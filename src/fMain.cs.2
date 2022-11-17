@@ -1,0 +1,2024 @@
+﻿using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.Data;
+using System.Drawing;
+using System.Drawing.Imaging;
+using System.Drawing.Drawing2D;
+using System.Text;
+using System.Windows.Forms;
+using System.Runtime.InteropServices;
+using System.Security;
+using System.IO;
+using System.IO.Compression;
+
+namespace grcol {
+    public partial class fMain:Form {
+        const int ZoomBase=120,ShapeBase=120,ShapeHalf=ShapeBase/2;
+        bmap map,undomap,redomap;
+        byte[] draw;
+        Bitmap bm;
+        ColorDialog CDialog=new ColorDialog();
+        Brush BackBrush=Brushes.LightGray;
+        bool Dirty=false;
+        OpenFileDialog ofd=new OpenFileDialog();
+        SaveFileDialog sfd=null;
+        PrintDialog printd=null;
+        PageSetupDialog paged=null;
+        bool timeDraw=false,timeDirty=false;
+        int NoDraw=0;
+        int mseq=0; // mouse sequence
+        int lmx,lmy; // last mouse position
+        int pmx,pmy,pmk; // press mouse position and keys
+        MouseButtons pmb;
+        int Color1=0xff0000,Color2=0xffff00;
+        int sx=0,sy=0,zoom=ZoomBase;
+        byte Height2=255;
+        bool colorshift;
+        int GradMode=0;
+        bool GradD8=false;
+        bool Fill2Black=true,BrushWhiteOnly=false;
+        bmap DrawBrush=null;        
+        int DrawMode=0;
+        string DrawShape="-60,0 60,60 60,-60";// "-60,0 0,60 60,0 0,-60";
+        bool ShapeMirrorX=false,ShapeMirrorY;
+        int[] Selection=new int[4];
+        bool movesel;
+        
+        int IX(int x) { return ((x-sx)*ZoomBase+zoom/2)/zoom;}
+        int IY(int y) { return ((y-sy)*ZoomBase+zoom/2)/zoom;}
+        void S2I(int x,int y,out int ix,out int iy) {
+          ix=IX(x);iy=IY(y);
+        }
+        int SX(int x) { return x*zoom/ZoomBase+sx;}
+        int SY(int y) { return y*zoom/ZoomBase+sy;}
+        
+
+        public fMain(string[] arg) {
+            string fname=arg.Length>0?arg[0]:null;
+            if(fname!=null) LoadFile(fname=="-C"?"":fname,false);
+            if(map==null) NewMap(false);
+            UpdateBitmap();
+            Repaint(true);
+            //for(int y=0;y<map.Data.Length;y++) map.Data[y]=(float)(y/512/512.0);
+            //map.FuncRadial(Bez,Combine.Max,.5,.5,.3,1);           
+            //map.FloodFill(0.9,0.9,0.33);
+
+            InitializeComponent();
+            fill2BlackToolStripMenuItem.Checked=Fill2Black;
+            UpdateColors();
+            UpdateDrawMode();
+            UpdateFillMode();                    
+        }
+
+        private void UpdateColors() {
+          bColor2.BackColor=IntColor(Color1);
+          bColor.BackColor=IntColor(Color2);
+        }
+
+        public void UpdateBitmap() {
+          if(bm!=null) bm.Dispose();
+          if(map!=null) bm=new Bitmap(map.Width-2,map.Height-2,PixelFormat.Format32bppRgb);//PixelFormat.Format24bppRgb);          
+        }
+        public void Repaint(bool dirty) {
+          if(NoDraw<1) {
+            Repaint(1,1,map.Width-2,map.Height-2,dirty);
+            if(DrawMode==5) DrawSelection();
+          }
+        }
+        int Clip(int x,int max) {
+          return x<0?0:x>max?max:x;
+        }
+        
+        public void Repaint(int x0,int y0,int x1,int y1,bmap brush) {
+          if(brush!=null) {
+            int d=brush.Width/2+1;
+            x0-=d;x1+=d;
+            d=brush.Height/2+1;
+            y0-=d;y1+=d;
+          }
+          Repaint(x0,y0,x1,y1,true);
+        }
+        public void Repaint(int x0,int y0,int x1,int y1,bool dirty) {
+          int w=map.Width-3,h=map.Height-3;
+          int r;
+          if(x0>x1) {r=x0;x0=x1;x1=r;}
+          if(y0>y1) {r=y0;y0=y1;y1=r;}
+          x0--;y0--;x1--;y1--;
+          x0=Clip(x0,w);x1=Clip(x1,w);
+          y0=Clip(y0,h);y1=Clip(y1,h);
+          if(dirty) bmap.ToBitmap(map,bm,x0,y0,x1,y1);
+          Graphics gr=this.CreateGraphics();
+          gr.InterpolationMode=zoom>ZoomBase?InterpolationMode.NearestNeighbor:InterpolationMode.Default;
+          int sx=SX(x0),sy=SY(y0);
+          Rectangle rect=new Rectangle(sx,sy,SX(x1+1)-sx,SY(y1+1)-sy);
+          gr.DrawImage(bm,rect,x0,y0,x1-x0+1,y1-y0+1,GraphicsUnit.Pixel);
+          if(x0==0&&y0==0&&x1==w&&y1==h) {
+            if(sy>0) gr.FillRectangle(BackBrush,0,0,Width,sy);
+            int ey=rect.Y+rect.Height;
+            if(ey<Height) gr.FillRectangle(BackBrush,0,ey,Width,Height-ey);
+            if(sx>0) gr.FillRectangle(BackBrush,0,sy,sx,ey-sy);
+            int ex=rect.X+rect.Width;
+            if(ex<Width) gr.FillRectangle(BackBrush,ex,sy,Width-ex,ey-sy);            
+          }
+          gr.Dispose();
+        }
+
+        private void miExit_Click(object sender, EventArgs e) {
+          Close();
+        }
+
+        void ZoomChange(int d,bool absolute,bool center) {
+          int zx,zy;
+          if(center) {zx=IX(Width/2);zy=IY(Height/2);} else zx=zy=0;
+          if(absolute) {
+            if(d==int.MaxValue) {
+              if(map!=null&&map.Width>0&&map.Height>0) {
+                int zoom1=ZoomBase*Width/map.Width;
+                int zoom2=ZoomBase*Height/map.Height;
+                zoom=zoom1<zoom2?zoom1:zoom2;
+                zx=map.Width/2;zy=map.Height/2;
+              } 
+            } else {
+              if(d<0) d=ZoomBase*-d;
+              else if(d==0) d=ZoomBase;
+              if(d<12) zoom=12;
+              else if(d>ZoomBase*32) zoom=ZoomBase*32;
+              else zoom=d;
+            }
+          } else if(d<0) 
+            while(d<0&&zoom>=12) {
+              zoom=zoom*3/4;
+              d+=120;
+            }
+          else 
+            while(d>0&&zoom<ZoomBase*32) {
+              zoom=zoom*4/3;
+              d-=120;
+            }
+          if(center) {
+            sx-=SX(zx)-Width/2;sy-=SY(zy)-Height/2;
+          }  
+        }
+        protected override void OnMouseWheel(MouseEventArgs e) {
+          int d=e.Delta;
+          bool hori=GDI.ShiftKey,vert=GDI.CtrlKey;
+          if(hori|vert) {
+            if(hori) sx+=d;
+            else sy+=d;
+            timeDraw=true;
+            return;
+          } 
+          int x=IX(e.X),y=IY(e.Y);          
+          ZoomChange(d,false,false);
+          sx=0;sy=0;
+          sx=e.X-SX(x);sy=e.Y-SY(y);
+          timeDraw=true;
+        }
+        void Fullscreen() {
+          bool f=FormBorderStyle!=FormBorderStyle.None;
+          if(!f&&(sx!=0||sy!=0||zoom!=ZoomBase)) {
+            sx=sy=0;zoom=ZoomBase;
+            Repaint(false);
+            return;
+          }
+          NoDraw++;
+          //MainMenuStrip.Visible=!f;
+          FormBorderStyle=f?FormBorderStyle.None:FormBorderStyle.Sizable;
+          sx=sy=0;zoom=ZoomBase;
+          NoDraw--;
+          WindowState=f?FormWindowState.Maximized:FormWindowState.Normal;          
+        }
+        void Clear() {
+          PushUndo();
+          map.LeaveBlack();
+          sx=sy=0;zoom=ZoomBase;
+          Repaint(true);
+        }
+        void Delete(bool c1) {
+          if(pmb==MouseButtons.Right) {
+            map.FillRectangle(IX(pmx)+1,IY(pmy)+1,IX(lmx)+1,IY(lmy)+1,c1?Color1:Color2);
+            CancelMouse();          
+          } else if(DrawMode==5) {
+            map.FillRectangle(Selection[0]+1,Selection[1]+1,Selection[2]+1,Selection[3]+1,c1?Color1:Color2);
+          } else return;          
+          Repaint(true);
+        }
+        void RemoveDots(bool black,bool white) { PushUndo();map.RemoveDots(black,white);Repaint(true);}
+        void Bright(int level) { PushUndo();map.Bright(false, level); Repaint(true); }
+        void Levels(int levels) { PushUndo();map.Levels(levels); Repaint(true); }
+        void Contour(bool white) { PushUndo();map.Contour(white); Repaint(true); }
+        void Invert(bool intensity,bool bw) { PushUndo();map.Invert(intensity,bw); Repaint(true); }
+        void NoScale() {
+          sx=sy=0;zoom=ZoomBase;
+          Repaint(false);
+        }
+        void RGBShift(bool rgb2cmy,bool back) {
+          if(rgb2cmy) map.RGB2CMY();          
+          else { 
+            if(!back) colorshift^=true;
+            map.RGBShift(colorshift?1:3);
+          }
+          Repaint(true);
+        }
+        protected override bool ProcessCmdKey(ref Message msg,Keys keyData) {
+          switch(keyData) {
+            case Keys.F11:Fullscreen();return true;
+            case Keys.Escape:
+              if(pmb!=MouseButtons.None)
+                CancelMouse();
+              else if(FormBorderStyle==FormBorderStyle.None) {
+                Fullscreen();
+              } else 
+                NoScale();
+              break;
+          }
+          bool ctrl=0!=(keyData&Keys.Control);
+          bool shift=0!=(keyData&Keys.Shift);
+          Keys k=keyData&~(Keys.Shift|Keys.Control);
+          if(ctrl) {            
+            switch(k) {
+             case Keys.D1:Color2=shift?0x880000:0xff0000;UpdateColors();break;
+             case Keys.D2:Color2=shift?0x888800:0xffff00;UpdateColors();break;
+             case Keys.D3:Color2=shift?0x008800:0x00ff00;UpdateColors();break;
+             case Keys.D4:Color2=shift?0x008888:0x00ffff;UpdateColors();break;
+             case Keys.D5:Color2=shift?0x000088:0x0000ff;UpdateColors();break;
+             case Keys.D6:Color2=shift?0x880088:0xff00ff;UpdateColors();break;
+             case Keys.D7:Color2=shift?0x444444:0x000000;UpdateColors();break;
+             case Keys.D8:Color2=shift?0xcccccc:0xffffff;UpdateColors();break;
+             case Keys.I:Invert(shift,true);break;
+             case Keys.Q:chColor.Checked^=true;break;
+             case Keys.O:OpenFile();break;
+             case Keys.C:Clipboard.SetImage(bm);break;
+             case Keys.V:ProcessCommand("paste");break;
+             case Keys.R:Clear();break;
+//             case Keys.O:hfmap.Load(map,"out.bb");Repaint();break;
+//             case Keys.S:map.Save("out.bb");break;             
+             case Keys.S:SaveFile(GDI.ShiftKey);break;
+             case Keys.P:if(shift) PrintPage();else Print(1);break;
+             case Keys.N:NewFile();break;
+             case Keys.E:NoScale();break;
+             case Keys.K:RGBShift(true,false);break;
+             case Keys.Z:Undo();break;
+             case Keys.Y:Redo();break;
+             case Keys.Left:sx+=shift?400:200;Repaint(false);break;
+             case Keys.Right:sx-=shift?400:200;Repaint(false);break;
+             case Keys.Up:sy+=shift?10:100;Repaint(false);break;
+             case Keys.Down:sy-=shift?10:100;Repaint(false);break;             
+             case Keys.PageUp:if(shift) ZoomChange(0,true,true);else sy+=Height/4;Repaint(false);break;
+             case Keys.PageDown:if(shift) ZoomChange(int.MaxValue,true,true);else sy-=Height/4;Repaint(false);break;
+             case Keys.Home:ZoomChange(shift?-8:-4,true,true);Repaint(false);break;
+             case Keys.End:ZoomChange(-32,true,true);Repaint(false);break;
+             case Keys.M:if(map!=null) map.Mirror(true,true);Repaint(true);break;
+             case (Keys)220:PushUndo();map.Expand(shift,true,undomap);Repaint(true);break;
+             default:goto ret;
+            }
+            return true;
+          } else {
+            switch(k) {
+              case Keys.D6:SetDrawMode("S");break;
+              case Keys.D5:SetDrawMode("E");break;
+              case Keys.D4:SetDrawMode("R");break;
+              case Keys.D3:SetDrawMode("P");break;
+              case Keys.D2:SetDrawMode("L");break;
+              case Keys.D1:SetDrawMode("");break;
+              case (Keys)219:Color1=map.XY(IX(lmx)+1,IY(lmy)+1);UpdateColors();break;
+              case (Keys)221:Color2=map.XY(IX(lmx)+1,IY(lmy)+1);UpdateColors();break;
+              case Keys.Back:{int r=Color1;Color1=Color2;Color2=r;};UpdateColors();break;
+              case Keys.I:Invert(shift,false);break;
+              case Keys.M:if(map!=null) map.Mirror(shift,!shift);Repaint(true);break;
+              case Keys.R:Rotate90(shift);break;
+              case Keys.K:RGBShift(false,shift);break;
+              case Keys.Z:ChooseColor(true);break;
+              case Keys.X:ChooseColor(false);break;
+              case (Keys)220:undomap=map.Clone();map.Expand(shift,false,undomap);Repaint(true);break;
+              case Keys.F:
+                undomap = map.Clone();
+                map.FloodFill(IX(lmx)+1,IX(lmy)+1,Color1,Color2,GDI.CapsLock,!shift,6,Fill2Black,IX(lmx)+1,IX(lmy)+1,false);
+                Repaint(true);
+                break;
+              case Keys.Left:sx+=shift?10:100;Repaint(false);break;
+              case Keys.Right:sx-=shift?10:100;Repaint(false);break;
+              case Keys.Up:sy+=shift?10:100;Repaint(false);break;
+              case Keys.Down:sy-=shift?10:100;Repaint(false);break;
+              case Keys.PageUp:if(shift) sx+=Width/4;else ZoomChange(120,false,true);Repaint(false);break;
+              case Keys.PageDown:if(shift) sx-=Width/4;else ZoomChange(-120,false,true);Repaint(false);break;
+              case Keys.Home:ZoomChange(shift?-2:-1,true,true);Repaint(false);break;
+              case Keys.End:ZoomChange(shift?-32:-16,true,true);Repaint(false);break;
+              case Keys.Subtract:ZoomChange(zoom>=3*ZoomBase?zoom-ZoomBase:zoom>ZoomBase*3/2?zoom-ZoomBase/2:zoom>ZoomBase?ZoomBase:zoom-ZoomBase/12,true,true);Repaint(false);break;
+              case Keys.Add:ZoomChange(zoom<ZoomBase?zoom+ZoomBase/12:zoom<ZoomBase*3?zoom+ZoomBase/2:zoom+ZoomBase,true,true);Repaint(false);break;
+              case Keys.Delete:Delete(shift);break;
+              case Keys.Insert:Delete(!shift);break;
+              default: goto ret;
+            }
+            return true;
+          } 
+         ret:
+          return base.ProcessCmdKey(ref msg,keyData);
+        }
+        void Rotate90(bool counter) {
+          if(map==null) return;
+          map=map.Rotate90(counter);
+          UpdateBitmap();
+          
+          int ix=IX(lmx),iy=IY(lmy),yx=ix,yy=iy;
+          if(ix>=0&&iy>=0&&ix<map.Height-2&&iy<map.Width-2) {            
+            if(counter) {yx=iy;yy=map.Height-2-ix;}
+            else {yx=map.Width-2-iy;yy=ix;}
+          } else {
+            if(ix>map.Height/2-1) yx-=map.Height-map.Width;
+            if(iy>map.Width/2-1) yy-=map.Width-map.Height;
+          }
+          
+          int dx=yx-ix,dy=yy-iy;
+          sx-=dx*zoom/ZoomBase;sy-=dy*zoom/ZoomBase;
+
+          Repaint(true);
+        }
+        void DrawLine(int x0,int y0,int x1,int y1,int color,bmap draw_brush,bool repaint,bool xor) {
+          /*int r=Radius();
+          x0=IX(x0);y0=IY(y0);x1=IX(x1);y1=IY(y1);
+          map.FuncLine(x0,y0,x1,y1,r,Height2,draw,shape);            
+          int s;
+          if(x0>x1) {s=x0;x0=x1;x1=s;}
+          if(y0>y1) {s=y0;y0=y1;y1=s;}
+          Repaint(x0-r,y0-r,x1+r,y1+r);        
+           */
+          if(xor) {
+            Graphics gr=CreateGraphics();
+            IntPtr hdc=gr.GetHdc();
+            int rop2=GDI.SetROP2(hdc,GDI.R2_NOTXORPEN);
+            GDI.SelectObject(hdc,GDI.GetStockObject(GDI.WHITE_PEN));
+            GDI.MoveToEx(hdc,SX(x0),SY(y0),IntPtr.Zero);
+            GDI.LineTo(hdc,SX(x1),SY(y1));
+            GDI.SetROP2(hdc,rop2);            
+            gr.ReleaseHdc(hdc);
+            gr.Dispose();
+            return;            
+          }
+          map.BrushLine(x0+1,y0+1,x1+1,y1+1,color,draw_brush,BrushWhiteOnly);
+          int r;
+          if(x0>x1) {r=x0;x0=x1;x1=r;}
+          if(y0>y1) {r=y0;y0=y1;y1=r;}
+          x1++;y1++;
+          if(repaint) Repaint(x0,y0,x1,y1,draw_brush);
+        }
+        static Shape ParseShape(string shape) {
+          if(string.IsNullOrEmpty(shape)) return null;
+          string[] sa=shape.Split(',',' ');
+          int n=sa.Length&~1;
+          if(n<2) return null;
+          Shape res=new Shape(n);
+          for(int i=0;i<n;i++) {
+            if(sa[i].StartsWith("m")) {
+              if(res.move==null) res.move=new bool[n/2];
+              res.move[i/2]=true;
+              sa[i]=sa[i].Substring(1);
+            }
+            int.TryParse(sa[i],out res.pts[i]);
+          }
+          return res;
+        }
+        void DrawRect(int x0,int y0,int x1,int y1,int color,bmap draw_brush,string shape,int rotate,bool mirrorx,bool mirrory,bool xor) {
+          Shape sh=ParseShape(shape);
+          int r;
+          if(x0>x1) {r=x0;x0=x1;x1=r;mirrorx^=true;}
+          if(y0>y1) {r=y0;y0=y1;y1=r;mirrory^=true;}
+          Graphics gr=null;
+          IntPtr hdc=IntPtr.Zero;
+          int rop2=0;
+          if(xor) {
+            gr=CreateGraphics();
+            hdc=gr.GetHdc();
+            rop2=GDI.SetROP2(hdc,GDI.R2_NOTXORPEN);
+            GDI.SelectObject(hdc,GDI.GetStockObject(GDI.WHITE_PEN));
+          }            
+          if(sh==null) {
+            if(xor) {
+              GDI.MoveToEx(hdc,SX(x0),SY(y0),IntPtr.Zero);
+              GDI.LineTo(hdc,SX(x1),SY(y0));
+              GDI.LineTo(hdc,SX(x1),SY(y1));
+              GDI.LineTo(hdc,SX(x0),SY(y1));
+              GDI.LineTo(hdc,SX(x1),SY(y0));
+            } else {
+              DrawLine(x0,y0,x1,y0,color,draw_brush,false,xor);
+              DrawLine(x1,y0,x1,y1,color,draw_brush,false,xor);
+              DrawLine(x1,y1,x0,y1,color,draw_brush,false,xor);
+              DrawLine(x0,y1,x0,y0,color,draw_brush,false,xor);
+            }
+          } else {
+            int sx=x0,sy=y0,dx=x1-sx,dy=y1-sy,tx=0,ty=0,tmx=mirrorx?-1:1,tmy=mirrory?-1:1;
+            switch(rotate&3) {
+             case 0:tx=1;ty=0;break;
+             case 1:tx=0;ty=-1;break;
+             case 2:tx=-1;ty=0;break;
+             case 3:tx=0;ty=1;break;
+            }
+            int[] pts=new int[sh.pts.Length];
+            for(int i=0;i<sh.pts.Length;i+=2) {
+              int vx=tmx*sh.pts[i],vy=tmy*sh.pts[i+1];
+              int rx=vx*tx-vy*ty,ry=vx*ty+vy*tx;
+              pts[i]=rx;pts[i+1]=ry;
+            }
+            int[] bb=Shape.BoundingBox(pts);            
+            bb[2]-=bb[0];bb[3]-=bb[1];
+            Shape.Move(pts,-bb[0],-bb[1]);
+            int x=sx+pts[pts.Length-2]*dx/bb[2],y=sy+pts[pts.Length-1]*dy/bb[3];
+            x0=x1=x;y0=y1=y;            
+            for(int i=0;i<pts.Length;i+=2) {
+              int nx=sx+pts[i]*dx/bb[2],ny=sy+pts[i+1]*dy/bb[3];
+              bool m=m=sh.move!=null&&sh.move[i/2];
+              if(!m) {
+                if(xor) {
+                  GDI.MoveToEx(hdc,SX(x),SY(y),IntPtr.Zero);
+                  GDI.LineTo(hdc,SX(nx),SY(ny));                  
+                } else DrawLine(x,y,nx,ny,color,draw_brush,false,xor);
+              }
+              x=nx;y=ny;
+              if(x<x0) x0=x;else if(x>x1) x1=x;
+              if(y<y0) y0=y;else if(y>y1) y1=y;
+            }
+          }
+          if(xor) {
+            GDI.SetROP2(hdc,rop2);
+            gr.ReleaseHdc(hdc);
+            gr.Dispose();
+          } else Repaint(x0-1,y0-1,x1+1,y1+1,draw_brush);
+        }
+        void DrawPolar(int x0,int y0,int x1,int y1,int color,bmap draw_brush,string shape,int rotate,bool mirrorx,bool mirrory,bool xor) {
+          int r,sx=x0,sy=y0,dx=x1-sx,dy=y1-sy,tx=0,ty=0,tmx=mirrorx?-1:1,tmy=mirrory?-1:1;
+          if(dx==0&&dy==0) return;
+          Shape sh=ParseShape(shape);
+          if(sh==null) return;
+          switch(rotate&3) {
+           case 0:tx=1;ty=0;break;
+           case 1:tx=0;ty=-1;break;
+           case 2:tx=-1;ty=0;break;
+           case 3:tx=0;ty=1;break;
+          }
+          Graphics gr=null;
+          IntPtr hdc=IntPtr.Zero;
+          int rop2=0;
+          if(xor) {
+            gr=CreateGraphics();
+            hdc=gr.GetHdc();
+            rop2=GDI.SetROP2(hdc,GDI.R2_NOTXORPEN);
+            GDI.SelectObject(hdc,GDI.GetStockObject(GDI.WHITE_PEN));
+          }
+          int vx=tmx*sh.pts[sh.pts.Length-2],vy=tmy*sh.pts[sh.pts.Length-1],x,y;
+          int rx=vx*tx-vy*ty+ShapeHalf,ry=vx*ty+vy*tx;
+          x=sx+(rx*dx-ry*dy)/ShapeBase;y=sy+(rx*dy+ry*dx)/ShapeBase;
+          x0=x1=x;y0=y1=y;
+          for(int i=0;i<sh.pts.Length;i+=2) {
+            vx=tmx*sh.pts[i];vy=tmy*sh.pts[i+1];
+            rx=vx*tx-vy*ty+ShapeHalf;ry=vx*ty+vy*tx;
+            int nx=sx+(rx*dx-ry*dy)/ShapeBase,ny=sy+(rx*dy+ry*dx)/ShapeBase;
+            bool m=m=sh.move!=null&&sh.move[i/2];
+            if(!m) {
+              if(xor) {
+                GDI.MoveToEx(hdc,SX(x),SY(y),IntPtr.Zero);
+                GDI.LineTo(hdc,SX(nx),SY(ny));
+                //gr.DrawLine(Pens.Black,IX(x),IY(y),IX(nx),IY(ny));
+              } else DrawLine(x,y,nx,ny,color,draw_brush,false,false);              
+            }  
+            x=nx;y=ny;
+            if(x<x0) x0=x;else if(x>x1) x1=x;
+            if(y<y0) y0=y;else if(y>y1) y1=y;
+          }
+          if(xor) {
+            GDI.SetROP2(hdc,rop2);
+            gr.ReleaseHdc(hdc);
+            gr.Dispose();
+          } else  Repaint(x0-1,y0-1,x1+1,y1+1,draw_brush);
+        }
+        void DrawEdge(int x0,int y0,int x1,int y1,int color,bmap draw_brush,string shape,int rotate,bool mirrorx,bool mirrory,bool xor) {
+          int r,sx=x0,sy=y0,dx=x1-sx,dy=y1-sy,tx=0,ty=0,tmx=mirrorx?-1:1,tmy=mirrory?-1:1;
+          if(dx==0&&dy==0) return;
+          Shape sh=ParseShape(shape);
+          if(sh==null) return;
+          switch(rotate&3) {
+           case 0:tx=1;ty=0;break;
+           case 1:tx=0;ty=-1;break;
+           case 2:tx=-1;ty=0;break;
+           case 3:tx=0;ty=1;break;
+          }
+          Graphics gr=null;
+          IntPtr hdc=IntPtr.Zero;
+          int rop2=0;
+          if(xor) {
+            gr=CreateGraphics();
+            hdc=gr.GetHdc();
+            rop2=GDI.SetROP2(hdc,GDI.R2_NOTXORPEN);
+            GDI.SelectObject(hdc,GDI.GetStockObject(GDI.WHITE_PEN));
+          }          
+          int vx=tmx*sh.pts[0],vy=tmy*sh.pts[1],x,y;
+          int px=vx*tx-vy*ty,py=vx*ty+vy*tx;
+          vx=tmx*sh.pts[2];vy=tmy*sh.pts[3];
+          int ex=vx*tx-vy*ty,ey=vx*ty+vy*tx;
+          ex-=px;ey-=py;
+          int er2=ex*ex+ey*ey;
+          vx=tmx*sh.pts[sh.pts.Length-2];vy=tmy*sh.pts[sh.pts.Length-1];
+          int rx=vx*tx-vy*ty-px,ry=vx*ty+vy*tx-py;
+          int wx=rx*ex+ry*ey,wy=-rx*ey+ry*ex;
+          x=sx+(wx*dx-wy*dy)/er2;y=sy+(wx*dy+wy*dx)/er2;
+          x0=x1=x;y0=y1=y;
+          for(int i=0;i<sh.pts.Length;i+=2) {
+            vx=tmx*sh.pts[i];vy=tmy*sh.pts[i+1];
+            rx=vx*tx-vy*ty-px;ry=vx*ty+vy*tx-py;
+            wx=rx*ex+ry*ey;wy=-rx*ey+ry*ex;
+            int nx=sx+(wx*dx-wy*dy)/er2,ny=sy+(wx*dy+wy*dx)/er2;
+            bool m=m=sh.move!=null&&sh.move[i/2];
+            if(xor) {
+              GDI.MoveToEx(hdc,SX(x),SY(y),IntPtr.Zero);
+              GDI.LineTo(hdc,SX(nx),SY(ny));
+              //gr.DrawLine(Pens.Black,IX(x),IY(y),IX(nx),IY(ny));
+            } else DrawLine(x,y,nx,ny,color,draw_brush,false,false);
+            x=nx;y=ny;
+            if(x<x0) x0=x;else if(x>x1) x1=x;
+            if(y<y0) y0=y;else if(y>y1) y1=y;
+          }                    
+          if(xor) {
+            GDI.SetROP2(hdc,rop2);
+            gr.ReleaseHdc(hdc);
+            gr.Dispose();
+          } else  Repaint(x0-1,y0-1,x1+1,y1+1,draw_brush);          
+        } 
+        void DrawSelection() {
+          if(Selection[0]>=0) DrawRect(Selection[0],Selection[1],Selection[2],Selection[3],bmap.White,DrawBrush,BoxShape,0,ShapeMirrorX,ShapeMirrorY,true);        
+        }
+        void NormSelection() {
+          int r;
+          if(Selection[0]>Selection[2]) {r=Selection[0];Selection[0]=Selection[2];Selection[2]=r;}
+          if(Selection[1]>Selection[3]) {r=Selection[1];Selection[1]=Selection[3];Selection[3]=r;}
+        }
+        bool InSelection(int x,int y) {
+          return x>=Selection[0]&&x<=Selection[2]&&y>=Selection[1]&&y<=Selection[3];
+        }
+        private void fMain_MouseDown(object sender,MouseEventArgs e) {
+          int cx=IX(e.X),cy=IY(e.Y);
+          pmk=(GDI.ShiftKey?1:0)|(GDI.CtrlKey?2:0);
+          if(0!=(e.Button&MouseButtons.Left)) {
+            PushUndo();
+            /*if(GradMode<0) {
+              int[] xy=new int[] {cx+1,cy+1};
+              switch(GradMode) {
+               case -3:map.FloodFillGrad(xy,Color1,Color2,true,true,GDI.CapsLock,true,Fill2Black);break;
+               case -2:map.FloodFillGrad(xy,Color1,Color2,false,true,GDI.CapsLock,true,Fill2Black);break;
+               default:map.FloodFillGrad(xy,Color1,Color2,false,false,GDI.CapsLock,true,Fill2Black);break;
+              }
+              Repaint(true);
+            } */
+          } else if(0!=(e.Button&MouseButtons.Middle)) {
+          } else if(0!=(e.Button&MouseButtons.Right)) {
+            PushUndo();
+            if(DrawMode==0) {
+              map.Brush(cx+1,cy+1,0!=(pmk&3)?bmap.White:0,DrawBrush,BrushWhiteOnly);
+              int bw=DrawBrush==null?1:DrawBrush.Width,bh=DrawBrush==null?1:DrawBrush.Height;
+              Repaint(cx-bw/2-1,cy-bh/2-1,cx+2+bw/2,cy+2+bh/2,true);
+            } else if(DrawMode==5) {
+              DrawSelection();
+              movesel=InSelection(cx,cy);
+            }
+          }
+         lmx=e.X;lmy=e.Y;
+         pmx=e.X;pmy=e.Y;
+         pmb=e.Button;
+        }
+        
+        private void fMain_MouseMove(object sender, MouseEventArgs e) {
+          int cx=IX(e.X),cy=IY(e.Y);  
+          /*MouseButtons mb=Comb==Combine.Max?MouseButtons.Left:Comb==Combine.Min?MouseButtons.Right:MouseButtons.Left|MouseButtons.Right;
+          if(0!=(e.Button&mb)&&mseq>0) {
+            DrawLine(lmx,lmy,e.X,e.Y);          
+          }*/
+          if(0!=(pmb&MouseButtons.Right)) {
+            if(DrawMode==0)
+              DrawLine(IX(lmx),IY(lmy),cx,cy,0!=(pmk&3)?bmap.White:0,DrawBrush,true,false);
+            else if(DrawMode==1) {
+              DrawLine(IX(pmx),IY(pmy),IX(lmx),IY(lmy),0!=(pmk&3)?bmap.White:0,DrawBrush,true,true);
+              DrawLine(IX(pmx),IY(pmy),cx,cy,0!=(pmk&3)?bmap.White:0,DrawBrush,true,true);
+            } else if(DrawMode==2) {
+              DrawPolar(IX(pmx),IY(pmy),IX(lmx),IY(lmy),0!=(pmk&3)?bmap.White:0,DrawBrush,DrawShape,0,ShapeMirrorX,ShapeMirrorY,true);
+              DrawPolar(IX(pmx),IY(pmy),cx,cy,0!=(pmk&3)?bmap.White:0,DrawBrush,DrawShape,0,ShapeMirrorX,ShapeMirrorY,true);
+            } else if(DrawMode==3) {
+              DrawRect(IX(pmx),IY(pmy),IX(lmx),IY(lmy),0!=(pmk&3)?bmap.White:0,DrawBrush,DrawShape,0,ShapeMirrorX,ShapeMirrorY,true);
+              DrawRect(IX(pmx),IY(pmy),cx,cy,0!=(pmk&3)?bmap.White:0,DrawBrush,DrawShape,0,ShapeMirrorX,ShapeMirrorY,true);
+            } else if(DrawMode==4) {
+              DrawEdge(IX(pmx),IY(pmy),IX(lmx),IY(lmy),0!=(pmk&3)?bmap.White:0,DrawBrush,DrawShape,0,ShapeMirrorX,ShapeMirrorY,true);
+              DrawEdge(IX(pmx),IY(pmy),cx,cy,0!=(pmk&3)?bmap.White:0,DrawBrush,DrawShape,0,ShapeMirrorX,ShapeMirrorY,true);
+            } else if(DrawMode==5) {
+              if(movesel) {
+                int dx=IX(lmx)-IX(pmx),dy=IY(lmy)-IY(pmy);
+                if(dx!=0||dy!=0)
+                  DrawRect(Selection[0]+dx,Selection[1]+dy,Selection[2]+dx,Selection[3]+dy,bmap.White,DrawBrush,BoxShape,0,ShapeMirrorX,ShapeMirrorY,true);
+                dx=cx-IX(pmx);dy=cy-IY(pmy);  
+                if(dx!=0||dy!=0)
+                  DrawRect(Selection[0]+dx,Selection[1]+dy,Selection[2]+dx,Selection[3]+dy,bmap.White,DrawBrush,BoxShape,0,ShapeMirrorX,ShapeMirrorY,true);;
+              } else {
+                DrawRect(IX(pmx),IY(pmy),IX(lmx),IY(lmy),0!=(pmk&3)?bmap.White:0,DrawBrush,BoxShape,0,ShapeMirrorX,ShapeMirrorY,true);
+                DrawRect(IX(pmx),IY(pmy),cx,cy,0!=(pmk&3)?bmap.White:0,DrawBrush,BoxShape,0,ShapeMirrorX,ShapeMirrorY,true);
+              }
+            } 
+          } else if(0!=(pmb&MouseButtons.Middle)) {
+            if(0==(3&pmk)) {
+              sx+=e.X-lmx;sy+=e.Y-lmy;
+              timeDraw=true;
+            }
+          } 
+          lmx=e.X;lmy=e.Y;
+        }
+        private void fMain_MouseUp(object sender,MouseEventArgs e) {
+          int cx=IX(e.X),cy=IY(e.Y);
+          if(0!=(pmb&MouseButtons.Left)) {
+            PushUndo();
+            if(GradMode<0) {
+              int[] xy=new int[] {cx+1,cy+1,IX(pmx)+1,IY(pmy)+1};
+              switch(GradMode) {
+               case -2:map.FloodFillGrad(xy,Color1,Color2,true,GradD8,GDI.CapsLock,true,Fill2Black);break;
+               default:map.FloodFillGrad(xy,Color1,Color2,false,GradD8,GDI.CapsLock,true,Fill2Black);break;
+              }
+              Repaint(true);
+            } else {
+              bool ctrl=GDI.CtrlKey;
+              fillres fr=map.FloodFill(IX(pmx)+1,IY(pmy)+1,ctrl?bmap.White:Color1,ctrl?bmap.White:Color2,GDI.CapsLock,!GDI.ShiftKey,GradMode,Fill2Black,cx+1,cy+1,false);              
+              if(fr.m>0) Repaint(fr.x0-1,fr.y0-1,fr.x1+1,fr.y1+1,true);
+            }
+          } else if(0!=(pmb&MouseButtons.Right)) {
+            if(DrawMode==1) {
+              DrawLine(IX(pmx),IY(pmy),cx,cy,0!=(pmk&3)?bmap.White:0,DrawBrush,true,false);
+            } else if(DrawMode==2) {
+              DrawPolar(IX(pmx),IY(pmy),cx,cy,0!=(pmk&3)?bmap.White:0,DrawBrush,DrawShape,0,ShapeMirrorX,ShapeMirrorY,false);
+            } else if(DrawMode==3) {
+              DrawRect(IX(pmx),IY(pmy),cx,cy,0!=(pmk&3)?bmap.White:0,DrawBrush,DrawShape,0,ShapeMirrorX,ShapeMirrorY,false);
+            } else if(DrawMode==4) {
+              DrawEdge(IX(pmx),IY(pmy),cx,cy,0!=(pmk&3)?bmap.White:0,DrawBrush,DrawShape,0,ShapeMirrorX,ShapeMirrorY,false);
+            } else if(DrawMode==5) {
+              if(movesel) {
+                int dx=IX(lmx)-IX(pmx),dy=IY(lmy)-IY(pmy);
+                if(dx!=0||dy!=0) {
+                  map.MoveRectangle(Selection[0]+1,Selection[1]+1,Selection[2]+1,Selection[3]+1,Selection[0]+dx+1,Selection[1]+dy+1,0!=(pmk&2)?-1:Color2,0!=(pmk&1)?Color2:-1);
+                  Selection[0]+=dx;Selection[1]+=dy;Selection[2]+=dx;Selection[3]+=dy;
+                  Repaint(true);
+                }
+              } else {
+                Selection[0]=IX(pmx);Selection[1]=IY(pmy);Selection[2]=cx;Selection[3]=cy;
+                NormSelection();
+              }
+            }             
+          } else if(0!=(pmb&MouseButtons.Middle)) {
+            if(0!=(3&pmk)) {
+              ZoomTo(IX(pmx),IY(pmy),cx,cy,0!=(pmk&1),3==(pmk&3));
+              timeDraw=true;
+            } else {
+              sx+=e.X-lmx;sy+=e.Y-lmy;
+              timeDraw=true;
+            } 
+          }/* else if(0!=(e.Button&mb)) {
+            if(mseq>0) {              
+              if(AutoSnap) Snap(true,Radius(),IX(e.X),IY(e.Y));   
+              map.ApplyDraw(Color2,Height2,Comb,draw,true,White,MinLevel);
+              mseq=0;
+            }
+          }*/
+          lmx=e.X;lmy=e.Y;pmb=MouseButtons.None;
+        } 
+        void CancelMouse() {
+          if(pmb==MouseButtons.None) return; 
+          Repaint(false);
+          pmb=MouseButtons.None;
+        }
+        void ZoomTo(int x0,int y0,int x1,int y1,bool bigger,bool z100) {
+          Rectangle cr=ClientRectangle;
+          int r;
+          if(x1<x0) {r=x1;x1=x0;x0=r;}
+          if(y1<y0) {r=y1;y1=y0;y0=r;}
+          x1-=x0;y1-=y0;
+          if(x1==0&&y1==0) {
+            x0=y0=0;x1=map.Width-2;y1=map.Height-1;
+          }
+          x1++;y1++;
+          int zx=cr.Width*ZoomBase/x1,zy=cr.Height*ZoomBase/y1;
+          if(zy<zx^bigger) zx=zy;
+          if(zx>ZoomBase*16) zx=ZoomBase*16;
+          else if(zx<12) zx=12;
+          zoom=z100?ZoomBase:zx;
+          sx=cr.Width/2-(x0+x1/2)*zoom/ZoomBase;
+          sy=cr.Height/2-(y0+y1/2)*zoom/ZoomBase;
+        }       
+
+
+        private void miFileSave_Click(object sender, EventArgs e) {
+          SaveFile(GDI.ShiftKey);
+        }
+        private void miFileSaveas_Click(object sender, EventArgs e) {
+          SaveFile(true); 
+        }
+        
+        
+        bool SaveFile(bool saveas) {
+          if(ofd.FileName==null||saveas) {
+            if(sfd==null) sfd=new SaveFileDialog();
+            sfd.FileName=ofd.FileName;
+            sfd.Filter=ofd.Filter;
+            sfd.Title=saveas?"Save as":"Save";
+            if(DialogResult.OK!=sfd.ShowDialog()) return false;
+            string fname=sfd.FileName;
+            if(Path.GetExtension(fname)=="") fname+=".png";
+            ChangeFileName(sfd.FileName);
+          }
+          bm.Save(ofd.FileName);          
+          UnsetDirty();
+          return true;
+        }
+
+        bool CheckDirty(string caption) {
+          if (!Dirty) return true;
+          DialogResult dr=MessageBox.Show(this,"Save changes?",caption,MessageBoxButtons.YesNoCancel,MessageBoxIcon.Exclamation,MessageBoxDefaultButton.Button3);
+          if(dr!=DialogResult.Yes) return dr==DialogResult.No;
+          return SaveFile(false);
+        }
+        
+        void SetDirty() {
+          if(Dirty) return;
+          Dirty=true;
+          if(!Text.EndsWith("*")) Text+="*";
+        }
+        void UnsetDirty() {
+          if(!Dirty) return;
+          Dirty=false;
+          if(Text.EndsWith("*")) Text=Text.Substring(0,Text.Length-1);        
+        }
+
+        void NewFile() {
+          if(!CheckDirty("New file")) return;          
+          ChangeFileName(null);
+          NewMap(true);
+        }
+        private void miFileOpen_Click(object sender, EventArgs e) {
+          OpenFile();
+        }
+        void OpenFile() {
+          if(!CheckDirty("Open file")) return;
+          string dir=Directory.GetCurrentDirectory();
+          ofd.Title="Open";
+          ofd.Filter="*.png|*.png|*.jpg|*.jpg;*.jpeg|*.bmp|*.bmp|*.gif|*.gif|bitmap|*.png;*.bmp;*.gif;*.jpg;*.jpeg|*.*|*.*";
+          ofd.DefaultExt="png";
+          if(DialogResult.OK==ofd.ShowDialog(this)) {
+            ClearUndo();
+            LoadFile(ofd.FileName,true);
+          }
+          Directory.SetCurrentDirectory(dir);
+        }
+
+        protected override void OnClosing(CancelEventArgs e) {
+          if(!CheckDirty("Close window")) e.Cancel=true;
+        }
+
+        private void miFilePage_Click(object sender, EventArgs e) { PrintPage();}
+        private void miFilePrint_Click(object sender, EventArgs e) { Print(GDI.CtrlKey?GDI.ShiftKey?6:4:GDI.ShiftKey?2:0);}
+        void PrintPage() {
+          if(paged==null) {
+            paged=new PageSetupDialog();
+            paged.EnableMetric=true;
+            paged.AllowPaper=paged.AllowMargins=paged.AllowOrientation=true;            
+            paged.PageSettings=new System.Drawing.Printing.PageSettings() {Landscape=bm.Width>bm.Height};
+            paged.PageSettings.Margins=new System.Drawing.Printing.Margins(0,0,0,0);
+          }
+          paged.ShowDialog();          
+        }
+        int PrintMulti,PrintNumber;
+        void Print(int multi) {
+          if(map==null) return;          
+          if(paged==null) PrintPage();          
+          if(printd==null) {
+            printd=new PrintDialog();
+						printd.UseEXDialog=true;
+          }
+          PrintMulti=multi==2||multi==4||multi==6?multi:0;
+          PrintNumber=0;
+          printd.PrinterSettings.DefaultPageSettings.Landscape=paged.PageSettings.Landscape;
+          if(DialogResult.OK==printd.ShowDialog(this)) {
+            using(System.Drawing.Printing.PrintDocument doc=new System.Drawing.Printing.PrintDocument()) {
+              paged.PageSettings.Landscape=printd.PrinterSettings.DefaultPageSettings.Landscape;
+              doc.DocumentName=Text+(multi==2?" 2x1":multi==4?" 2x2":multi==6?" 3x2":"");
+              doc.PrinterSettings=printd.PrinterSettings;
+              doc.DefaultPageSettings=paged.PageSettings.Clone() as System.Drawing.Printing.PageSettings;
+              doc.PrintPage+=new System.Drawing.Printing.PrintPageEventHandler(doc_PrintPage);
+              doc.Print();
+            }
+          }
+        }
+        
+        void doc_PrintPage(object sender,System.Drawing.Printing.PrintPageEventArgs e) {
+          Graphics gr=e.Graphics;
+          Rectangle rect=e.MarginBounds;
+          PrintNumber++;
+          Rectangle bmx;
+          bool bl,br,bt,bb;
+          if(PrintMulti==6) {
+            int w2=bm.Width/2,w3=bm.Width/3,h2=bm.Height/2,h3=bm.Height/3;
+            if(3*w3<bm.Width-1) w3++;if(3*h3<bm.Height-1) h3++;
+            if((rect.Width*h2>rect.Height*w3?rect.Height*w3/h2:w3)<(rect.Width*h3>rect.Height*w2?rect.Height*w2/h3:w2)) {
+              int dx=(PrintNumber-1)%3,dy=(PrintNumber-1)/3;
+              bmx=new Rectangle(dx==1?w3:dx==2?2*w3:0,dy==1?h2:0,dx==2?bm.Width-2*w3:w3,dy==1?bm.Height-h2:h2);
+            } else {
+              int dx=(PrintNumber-1)/3,dy=(PrintNumber-1)%3;
+              bmx=new Rectangle(dx==1?w2:0,dy==1?h3:dy==2?2*h3:0,dx==1?bm.Width-w2:w2,dy==2?bm.Height-2*h3:h3);
+            }
+            bl=bmx.Left>0;br=bmx.Left<w2;bt=bmx.Top>0;bb=bmx.Top<h2;
+          } else if(PrintMulti==4) {
+            int w2=bm.Width/2,h2=bm.Height/2;
+            bmx=new Rectangle(
+               PrintNumber==2||PrintNumber==4?w2:0
+              ,PrintNumber==3||PrintNumber==4?h2:0
+              ,PrintNumber==1||PrintNumber==3?w2:bm.Width-w2
+              ,PrintNumber==1||PrintNumber==2?h2:bm.Height-h2
+            );
+            bl=bmx.Left>0;br=!bl;bt=bmx.Top>0;bb=!bt;
+          } else if(PrintMulti==2) {
+            int w2=bm.Width/2,h2=bm.Height/2;
+            if((rect.Width*bm.Height>rect.Height*w2?rect.Height*w2/bm.Height:w2)<(rect.Width*h2>rect.Height*bm.Width?rect.Height*bm.Width/h2:bm.Width)) {
+              bmx=new Rectangle(PrintNumber==1?0:w2,0,PrintNumber==1?w2:bm.Width-w2,bm.Height);
+              bl=bmx.Left>0;br=!bl;bb=bt=false;
+            } else {
+              bmx=new Rectangle(0,PrintNumber==1?0:h2,bm.Width,PrintNumber==1?h2:bm.Height-h2);
+              bl=br=false;bt=bmx.Top>0;bb=!bt;
+            }
+          } else {
+            bmx=new Rectangle(0,0,bm.Width,bm.Height);          
+            bl=br=bt=bb=false;
+          }
+          if(rect.Width*bmx.Height>rect.Height*bmx.Width) {
+            int w=rect.Width-rect.Height*bmx.Width/bmx.Height;
+            if(br&&!bl) rect.X+=w;
+            else if(bl==br) rect.X+=w/2;
+            rect.Width-=w;            
+          } else {
+            int h=rect.Height-rect.Width*bmx.Height/bmx.Width;
+            if(bb&&!bt) rect.Y+=h;
+            else if(bt==bb) rect.Y+=h/2;
+            rect.Height-=h;
+          }
+          gr.DrawImage(bm,rect,bmx.Left,bmx.Top,bmx.Width,bmx.Height,GraphicsUnit.Pixel);
+          if(bl||br||bt||bb) {
+            Pen p=new Pen(Color.Black,0.25f);          
+            if(bl) gr.DrawLine(p,rect.Left-1,rect.Top-(bt?1:0),rect.Left-1,rect.Bottom+(bb?1:0));
+            if(br) gr.DrawLine(p,rect.Right+1,rect.Top-(bt?1:0),rect.Right+1,rect.Bottom+(bb?1:0));
+            if(bt) gr.DrawLine(p,rect.Left-(bl?1:0),rect.Top-1,rect.Right+(br?1:0),rect.Top-1);
+            if(bb) gr.DrawLine(p,rect.Left-(bl?1:0),rect.Bottom+1,rect.Right+(br?1:0),rect.Bottom+1);
+          }
+          e.HasMorePages=PrintNumber<PrintMulti;
+        }
+        internal void PushUndo() {
+          undomap=map.Clone();
+          redomap=null;
+          SetDirty(); 
+        }
+        internal void Undo() {
+          if(undomap!=null&&undomap!=map) {
+            redomap=map;
+            map=undomap;
+            undomap=null;
+            Repaint(true);
+          }        
+        }
+        internal void Redo() {
+          if(redomap!=null&&redomap!=map) {
+            undomap=map;
+            map=redomap;
+            redomap=null;
+            Repaint(true);
+          }
+        }
+        internal void ClearUndo() { undomap=redomap=null;}
+        private void miCommand_Click(object sender, EventArgs e) {
+          ToolStripDropDownItem mi=sender as ToolStripDropDownItem;
+          string cmd=mi.Tag as string;
+          bool shift=GDI.ShiftKey,ctrl=GDI.CtrlKey;
+          if(shift||ctrl) 
+            switch(cmd) {
+             case "expand":if(shift) cmd+=" x8";if(ctrl) cmd+=" diff";break;
+            }
+          ProcessCommand(cmd);
+        }
+        bool HasParam(string[] cmd,string param) {
+          return Array.IndexOf(cmd,param)>=0;
+        }        
+        void ProcessCommand(string cmd) {
+          if(cmd==null) return;
+          string[] sa=cmd.Split(new char[] {' '},StringSplitOptions.RemoveEmptyEntries);
+          cmd=sa[0];
+          switch(cmd) {
+           case "undo":Undo();break;
+           case "clear":Clear();break;
+           case "remove_dots":RemoveDots(true,true);break;
+           case "bright":Bright(128);break;
+           case "levels":Levels(16);break;
+           case "paste":LoadFile("",true);break;
+           case "contour":Contour(false);break;
+           case "whiteonly":miBrushWhiteOnly.Checked=(BrushWhiteOnly^=true);break;
+           case "expand":Expand(HasParam(sa,"x8"),HasParam(sa,"diff"));break;
+          }
+        }
+        void Expand(bool x8,bool diff) {
+          PushUndo();map.Expand(x8,diff,undomap);Repaint(true);
+        }
+
+        private void fMain_Resize(object sender,EventArgs e) {
+          Repaint(false);
+        }
+
+        protected override void OnPaintBackground(PaintEventArgs e) {
+          //base.OnPaintBackground(e);
+        }
+        protected override void OnPaint(PaintEventArgs e) {
+          //base.OnPaint(e);
+          //Repaint(e.Graphics,e.ClipRectangle.Left,e.ClipRectangle.Top,e.ClipRectangle.Width,e.ClipRectangle.Height);
+          timeDraw=true;
+        }        
+
+        private void timer_Tick(object sender,EventArgs e) {
+          if(timeDraw) {
+            Repaint(timeDirty);
+            timeDraw=timeDirty=false;
+          }
+        }
+        int ColorIdx(int idx,bool shift) {
+          idx=idx*2+(shift?1:0)-1;
+          switch(idx) {
+           case 1:return 0xff0000;
+           case 2:return 0xff0088;
+           case 3:return 0xffff00;
+           case 4:return 0xff8800;
+           case 5:return 0x00ff00;
+           case 6:return 0x88ff00;
+           case 7:return 0x00ffff;
+           case 8:return 0x00ff88;
+           case 9:return 0x0000ff;
+           case 10:return 0x0088ff;
+           case 11:return 0xff00ff;
+           case 12:return 0x8800ff;
+           case 13:return 0xffffff;
+           case 14:return 0xcccccc;
+           case 15:return 0x888888;
+           case 16:return 0x444444;
+           default:return 0;
+          }
+        }
+        static Color IntColor(int color) {return Color.FromArgb(color|(255<<24));}
+        private void bColor_Click(object sender,EventArgs e) {
+          return;
+          //ColorClick(sender as Button,MouseButtons.Left);
+        }
+        private void bColor_MouseDown(object sender,MouseEventArgs e) {
+          ColorClick(sender as Button,e.Button); 
+        }        
+        void ColorClick(Button b,MouseButtons button) {
+          int color;
+          color=b.BackColor.ToArgb()&0xffffff;
+          bool shift=GDI.ShiftKey;
+          int rgbs=bmap.RGBSum(color);
+          bool grx=b==bColorGr1||b==bColorGr2||b==bColorGr3||b==bColorGr4;
+          if(GDI.ShiftKey) color=Palette.ColorIntensity765(color,765-(765-rgbs)/2);
+          else if(GDI.CtrlKey) color=Palette.ColorIntensity765(color,rgbs/2);
+          if(!grx) {
+            bColorGr1.BackColor=Palette.IntColor(Palette.ColorIntensity765(color,765-(765-rgbs)/2));
+            bColorGr2.BackColor=Palette.IntColor(Palette.ColorIntensity765(color,rgbs*3/4));
+            bColorGr3.BackColor=Palette.IntColor(Palette.ColorIntensity765(color,rgbs*2/4));
+            bColorGr4.BackColor=Palette.IntColor(Palette.ColorIntensity765(color,rgbs*1/4));
+          }
+          /*} else {
+            int j=b.Tag!=null?Convert.ToInt32(b.Tag):0;
+            int i=GDI.CtrlKey?128:256;
+            //if(GDI.ShiftKey) i-=64;
+            bool shift=GDI.ShiftKey;
+            color=Palette.ColorIntensity(j>0?ColorIdx(j,shift):b.BackColor.ToArgb()&0xffffff,i);
+          }*/
+          if(button==MouseButtons.Right) {
+            bColor.BackColor=IntColor(Color2=color);
+          } else {
+            bColor2.BackColor=IntColor(Color1=color);
+          }
+        }
+        private void bGradMode_Click(object sender, EventArgs e) {
+          Control c=sender as Control;
+          ToolStripDropDownItem m=sender as ToolStripDropDownItem;
+          string s=(m!=null?m.Tag:c!=null?c.Tag:null) as string;
+          int x;
+          int.TryParse(s,out x);
+          if(x==-3) { GradD8^=true;if(GradMode>=0) GradMode=-1;}
+          else GradMode=x;
+          Button[] ba=new Button[] {bModeCircle,bModeFill,bModeBorder};
+          foreach(Button b in ba) b.BackColor=SystemColors.Control;
+          Button bx;
+          switch(GradMode) {
+           case 0:bx=ba[0];break;
+           case -1:bx=ba[1];break;
+           case -2:bx=ba[2];break;
+           default:bx=null;break;
+          }          
+          if(bx!=null) bx.BackColor=Color.White;
+          UpdateFillMode();
+        }
+        void UpdateFillMode() {
+          mFillCircle.Checked=GradMode==0;
+          mFillDiamond.Checked=GradMode==1;
+          mFillSquare.Checked=GradMode==2;
+          mFillHorizont.Checked=GradMode==3;
+          mFillVertical.Checked=GradMode==4;
+          mFillRaise.Checked=GradMode==5;
+          mFillFall.Checked=GradMode==6;
+          
+          mFillD8.Checked=GradD8;
+          mFillFlood.Checked=GradMode==-1;
+          mFillBorder.Checked=GradMode==-2;          
+        }
+
+        void ChooseColor(bool color2) {
+          CDialog.Color=(color2?bColor2:bColor).BackColor;
+          CDialog.FullOpen=true;
+          if(DialogResult.OK==CDialog.ShowDialog(this)) {
+            int rgb=CDialog.Color.ToArgb()&0xffffff;
+            if(color2) {
+              Color1=rgb;
+              bColor2.BackColor=CDialog.Color;
+            } else {
+              Color2=rgb;
+              bColor.BackColor=CDialog.Color;
+            }            
+            int[] cc=CDialog.CustomColors;
+            int h,c=(CDialog.Color.B<<16)|(CDialog.Color.G<<8)|CDialog.Color.R;
+            if(cc[0]==c) return;
+            for(h=0;h<cc.Length-1;h++)
+              if(cc[h]==c) break;
+            while(h>0) {
+              cc[h]=cc[h-1];
+              h--;
+            }
+            cc[0]=c;  
+            CDialog.CustomColors=cc;
+          }        
+        }
+        private void bColor_Click2(object sender,EventArgs e) {
+          ChooseColor(false);
+        }
+
+        private void bColor2_Click(object sender, EventArgs e) {
+          ChooseColor(true);
+        }
+        private void bColor2_MouseDown(object sender, MouseEventArgs e) {
+          if(e.Button==MouseButtons.Right) {
+            bool b2=sender==bColor2;
+            if(b2) {
+              Color2=Color1;
+              bColor.BackColor=bColor2.BackColor;
+            } else {
+              Color1=Color2;
+              bColor2.BackColor=bColor.BackColor;
+            }
+            if(GDI.CtrlKey||GDI.ShiftKey) ChooseColor(!b2);
+          }  
+        }
+
+        private void bSwap_Click(object sender, EventArgs e) {
+          int r=Color1;
+          Color1=Color2;Color2=r;
+          bColor2.BackColor=IntColor(Color1);
+          bColor.BackColor=IntColor(Color2);
+        }
+        
+
+        private void bClear_Click(object sender,EventArgs e) {
+          Clear();
+        }
+
+        private void panel_MouseUp(object sender,MouseEventArgs e) {
+          AnchorStyles anch=panel.Anchor;
+          Point l=panel.Location;
+          if(e.X<0) {
+            l.X=0;
+            anch=anch&~AnchorStyles.Right|AnchorStyles.Left;
+          } else if(e.X>panel.Width) {
+            l.X=ClientSize.Width-panel.Width;
+            anch=anch&~AnchorStyles.Left|AnchorStyles.Right;
+          }
+          if(e.Y<0) {
+            l.Y=0;
+            anch=anch&~AnchorStyles.Bottom|AnchorStyles.Top;
+          } else if(e.Y>panel.Height) {
+            l.Y=ClientSize.Height-panel.Height;
+            anch=anch&~AnchorStyles.Top|AnchorStyles.Bottom;
+          }
+          if(l.X!=panel.Left||l.Y!=panel.Top) panel.Location=l;
+          if(anch!=panel.Anchor) panel.Anchor=anch;
+        }
+
+        
+        void ChangeFileName(string filename) {
+          ofd.FileName=filename;
+          string fn=Path.GetFileName(filename);
+          Dirty=false;
+          Text="Grcol"+(string.IsNullOrEmpty(fn)?"":" - "+fn);//+(Dirty?"*":"");
+        }
+        void LoadFile(string filename,bool update) {
+          Image x;
+          if(string.IsNullOrEmpty(filename)) {
+            ofd.FileName=null;
+            x=Clipboard.GetImage();
+            if(x==null) return;
+            PushUndo();
+          } else {
+            if(!File.Exists(filename)) return;
+            x=Bitmap.FromFile(filename);
+            ChangeFileName(filename);
+            ClearUndo();            
+          }
+          bm=new Bitmap(x); 
+          x.Dispose();
+          map=bmap.FromBitmap(null,bm);
+          if(update) { Repaint(true);}
+        }
+        void NewMap(bool update) {
+          ClearUndo();
+          map=new bmap(Screen.PrimaryScreen.Bounds.Width+2,Screen.PrimaryScreen.Bounds.Height+2);
+          map.Clear();
+          if(update) {UpdateBitmap();Repaint(true);}
+        }
+
+        private void fill2BlackToolStripMenuItem_Click(object sender, EventArgs e) {
+          Fill2Black^=true;
+          fill2BlackToolStripMenuItem.Checked=Fill2Black;
+        }
+
+        private void miFileNew_Click(object sender, EventArgs e) {
+          NewFile();
+        }
+
+        private void miBrush_Click(object sender, EventArgs e) {
+          ToolStripDropDownItem mi=sender as ToolStripDropDownItem;
+          string brush=mi.Tag as string;
+          DrawBrush=string.IsNullOrEmpty(brush)||brush=="1"?null:new bmap(brush);
+        }
+
+        void UpdateDrawMode() {
+          miDrawFree.Checked=DrawMode==0;
+          miDrawLine.Checked=DrawMode==1;
+          miDrawPolar.Checked=DrawMode==2;
+          miDrawRect.Checked=DrawMode==3;
+          miDrawEdge.Checked=DrawMode==4;
+        }
+        private void miDraw_Click(object sender, EventArgs e) {
+          ToolStripDropDownItem mi=sender as ToolStripDropDownItem;
+          SetDrawMode(mi.Tag as string);
+        }
+        void SetDrawMode(string mode) {
+          int mode2=mode=="L"?1:mode=="P"?2:mode=="R"?3:mode=="E"?4:mode=="S"?5:0;
+          if(mode2!=5&&DrawMode==5) DrawSelection();
+          else if(mode2==5&&DrawMode!=5) Selection[0]=-1;
+          DrawMode=mode2;
+          UpdateDrawMode();
+        }
+
+        private void miDrawMirror_Click(object sender, EventArgs e) {
+          ToolStripDropDownItem mi=sender as ToolStripDropDownItem;
+          string mode=mi.Tag as string;
+          if(mode=="x") ShapeMirrorX^=true;
+          if(mode=="y") ShapeMirrorY^=true;
+          miDrawMirrorX.Checked=ShapeMirrorX;
+          miDrawMirrorY.Checked=ShapeMirrorY;
+        }
+
+        static string BoxShape="-60,-60 -60,60 60,60 60,-60";
+        static string ShapeByName(string name) {
+          switch(name) {
+           default:
+           case "box":return BoxShape;
+           case "diamond":return "-60,0 0,60 60,0 0,-60";
+           case "diamond2":return "-60,0 0,34 60,0 0,-34";
+           case "triangle":return "-60,0 60,30 60,-30";
+           case "triangle90": return "-60,0 0,60 60,0";
+           case "triangle3":return "m-60,0 60,60 60,-60 -60,0 60,20 m-60,0 60,-20";
+           case "arrow": return "-60,0 0,60 0,30 60,30 60,-30 0,-30 0,-60";
+           case "hexagon": return "-60,0 -30,52 30,52 60,0 30,-52 -30,-52";
+           case "circle":return "-60,5 -57,20 -50,34 -34,50 -20,57 -5,60 5,60 20,57 34,50 50,34 57,20 60,5 60,-5 57,-20 50,-34 34,-50 20,-57 5,-60 -5,-60 -20,-57 -34,-50 -50,-34 -57,-20 -60,-5"; 
+           case "star":return "-60,0 -14,0 0,42 14,0 60,0 22,-26 36,-68 0,-41 -36,-68 -22,-26"; 
+           case "octa":return "-60,25 -25,60 25,60 60,25 60,-25 25,-60 -25,-60 -60,-25"; 
+           case "star8":return "-30,0 -60,30 -30,30 -30,60 0,30 30,60 30,30 60,30 30,0 60,-30 30,-30 30,-60 0,-30 -30,-60 -30,-30 -60,-30";
+           case "star12":return "-60,0 -40,20 -60,40 -40,40 -40,60 -20,40 0,60 20,40 40,60 40,40 60,40 40,20 60,0 40,-20 60,-40 40,-40 40,-60 20,-40 0,-60 -20,-40 -40,-60 -40,-40 -60,-40 -40,-20"; 
+           case "star16":return "-40,-0 -60,20 -40,20 -60,40 -40,40 -40,60 -20,40 -20,60 0,40 20,60 20,40 40,60 40,40 60,40 40,20 60,20 40,0 60,-20 40,-20 60,-40 40,-40 40,-60 20,-40 20,-60 0,-40 -20,-60 -20,-40 -40,-60 -40,-40 -60,-40 -40,-20 -60,-20"; 
+          }
+        }
+        void SetShape(string shname) {
+          DrawShape=ShapeByName(shname);
+        }
+        private void miShape_Click(object sender, EventArgs e) {
+          ToolStripDropDownItem mi=sender as ToolStripDropDownItem;
+          if(DrawMode<2) { DrawMode=2;UpdateDrawMode();}
+          string tag=mi.Tag as string;
+          if(tag.IndexOf(',')>=0) {
+            string[] sa=tag.Split(',');
+            int i=0;
+            if(GDI.ShiftKey) i=2;
+            if(GDI.CtrlKey) i++;
+            tag=sa[i<sa.Length?i:sa.Length-1];
+          }
+          SetShape(tag);
+        }
+
+
+    }
+    public struct fillres {
+      public int x0,y0,x1,y1,m;
+    }
+    public class Shape {
+      public int[] pts;
+      public bool[] move;
+      
+      public Shape(int len) { pts=new int[len];}      
+      public Shape(Shape src) { 
+        if(src.pts!=null) pts=src.pts.Clone() as int[];
+        if(src.move!=null) move=src.move.Clone() as bool[];
+      }
+      public static int[] BoundingBox(int[] pts) {
+        if(pts==null||pts.Length<2) return null;
+        int[] bb=new int[4];
+        bb[0]=bb[2]=pts[0];bb[1]=bb[3]=pts[1];
+        for(int i=2;i<pts.Length;i++) {
+          if(pts[i]<bb[0]) bb[0]=pts[i];else if(pts[i]>bb[2]) bb[2]=pts[i];
+          i++;
+          if(pts[i]<bb[1]) bb[1]=pts[i];else if(pts[i]>bb[3]) bb[3]=pts[i];
+        }
+        return bb;
+      }
+      public static void Move(int[] pts,int dx,int dy) {
+        if(pts==null) return;
+        for(int i=0;i<pts.Length;i++)
+          pts[i]+=0==(i&1)?dx:dy;
+      }
+    }    
+    public class bmap {
+      public int Width,Height;
+      public int[] Data; //r,g,b,h
+      public const int White=0xffffff,Black=0;
+      public static readonly int[] sqrt=new int[1048677];
+
+      public override string ToString() {
+        return ""+Width+"x"+Height;
+      }
+      
+      static bmap() {
+        int j=0,j2=0;
+        for(int i=0;i<sqrt.Length;i++) {
+          if(j2<=i) {j2+=2*j+1;j++;}
+          sqrt[i]=j-1;
+        }
+      }
+      public static int isqrt(int x) {
+        if(x<1) return 0;
+        else if(x<sqrt.Length) return sqrt[x];
+        else return (int)Math.Sqrt(x);
+      }
+      int isqrt2(int x) {
+        uint a,a2;
+        if(x<4) return x>0?1:0;
+        a=(uint)(x>>(bitscan(x)>>1));
+        do {
+          a2=a;
+          a=(uint)(a2+x/a2)>>1;
+        } while(a<a2);
+        return (int)a2;
+      }
+      
+      public bmap() {}
+      public bmap(int width,int height) {Alloc(width,height);}
+      public bmap(string brush) {
+        string[] line=brush.Split('.');
+        Width=line[0].Length;Height=line.Length;
+        Alloc(Width,Height);
+        for(int y=0;y<Height;y++) {
+          string l=line[y];
+          for(int x=0;x<l.Length;x++)
+            Data[y*Width+x]=l[x]!='0'?White:0;
+        }
+      }      
+      public bmap(bmap src) {Copy(src);}
+      public bmap Clone() { return new bmap(this);}
+      public void Copy(bmap src) {
+        if(src==null) return;
+        Data=src.Data.Clone() as int[];
+        Width=src.Width;Height=src.Height;
+      }
+      public void Alloc(int width,int height) {        
+        Data=new int[(Width=width)*(Height=height)];
+      }
+      public int XY(int x,int y) {
+        if(x<0||y<0||x>=Width||y>=Height) return 0;
+        return Data[y*Width+x];
+      }
+      public void XY(int x,int y,int color) {
+        if(x<0||y<0||x>=Width||y>=Height) return;
+        Data[y*Width+x]=color;
+      }
+      public void XY(int x,int y,int color,bool whiteonly) {
+        if(x<0||y<0||x>=Width||y>=Height) return;
+        if(!whiteonly||(Data[y*Width+x]&0xffffff)==White)
+          Data[y*Width+x]=color;
+      }
+      
+      public void Brush(int x,int y,int color,bmap brush,bool whiteonly) {
+        if(brush==null) { XY(x,y,color,whiteonly);return;}
+        int bx=brush.Width/2,by=brush.Height/2;
+        if(x<-brush.Width||y<-brush.Height||x>=Width+brush.Width||y>=Height+brush.Height) return;
+        for(int i=0;i<brush.Height;i++) {
+          int dy=y+i-by;
+          if(dy<0||dy>=Height) continue;
+          for(int j=0;j<brush.Width;j++) {
+           int dx=x+j-bx;
+           if(dx<0||dx>=Width) continue;
+           if(brush.Data[i*brush.Width+j]!=0) 
+             if(!whiteonly||(Data[dy*Width+dx]&0xffffff)==White) Data[dy*Width+dx]=color;
+          }
+        }
+      }
+
+      public void LeaveBlack() {
+        for(int i=0;i<Data.Length;i++) {
+          int x=Data[i]&White;
+          if(x!=0&&x!=White) Data[i]=White;
+        }
+      }
+      public void FillRectangle(int x,int y,int x2,int y2,int color) {
+        int r;
+        if(x2<x) {r=x;x=x2;x2=r;}
+        if(y2<y) {r=y;y=y2;y2=r;}
+        if(x2<0||y2<0||x>=Width||y>=Height) return;
+        if(x<0) x=0;if(x2>=Width) x2=Width-1;
+        if(y<0) y=0;if(y2>=Height) y2=Height-1;
+        int h=y*Width+x,n=x2-x+1;
+        while(y<=y2) {
+          for(int he=h+n;h<he;h++)
+            Data[h]=color;
+          h+=Width-n;
+          y++;
+        }        
+      }
+      public void MoveRectangle(int x,int y,int x2,int y2,int dx,int dy,int bgcolor,int trcolor) {
+        int w=x2-x+1,h=y2-y+1;
+        bmap bm2=new bmap(w,h);
+        bm2.Clear(bgcolor);
+        bm2.CopyRectangle(this,x,y,x2,y2,0,0,-1);
+        if(bgcolor!=-1) FillRectangle(x,y,x2,y2,bgcolor);
+        CopyRectangle(bm2,0,0,w-1,h-1,dx,dy,trcolor);
+      }
+      
+      public void CopyRectangle(bmap src,int x,int y,int x2,int y2,int dx,int dy,int trcolor) {
+        if(x<0) {dx-=x;x=0;} else if(x>=src.Width) x=src.Width-1;
+        if(y<0) {dy-=y;y=0;} else if(y>=src.Height) y=src.Height-1;
+        int n=x2-x+1,g=dy*Width+dx,h=y*src.Width+x;
+        while(y<=y2) {
+          for(int he=h+n;h<he;h++,g++) {
+            int c=src.Data[h];
+            if(c!=trcolor) Data[g]=c;
+          }
+          g+=Width-n;h+=src.Width-n;
+          y++;
+        }
+      }
+      
+      public void Save(string filename) {
+        Bitmap bm=new Bitmap(Width-2,Height-2,PixelFormat.Format32bppRgb);
+        ToBitmap(this,bm);
+        bm.Save(filename);
+        bm.Dispose();
+      }
+      public static bmap FromBitmap(bmap map,Bitmap bm) {
+        if(map==null) map=new bmap();
+        map.Alloc(bm.Width+2,bm.Height+2);
+        map.Clear();
+        Rectangle r=new Rectangle(0,0,bm.Width,bm.Height);
+        BitmapData bd=bm.LockBits(r,ImageLockMode.ReadOnly,PixelFormat.Format32bppRgb);
+        for(int y=0;y<bd.Height;y++)
+          Marshal.Copy(new IntPtr(bd.Scan0.ToInt64()+bd.Stride*y),map.Data,(1+y)*map.Width+1,bd.Width);        
+        bm.UnlockBits(bd);
+        map.ClearByte();
+        return map;
+      }
+      public static void ToBitmap(bmap map,Bitmap bm) {
+        Rectangle r=new Rectangle(0,0,bm.Width,bm.Height);                
+        BitmapData bd=bm.LockBits(r,ImageLockMode.WriteOnly,PixelFormat.Format32bppRgb);
+        for(int y=0;y<bd.Height;y++)
+          Marshal.Copy(map.Data,(1+y)*map.Width+1,new IntPtr(bd.Scan0.ToInt64()+bd.Stride*y),bd.Width);
+        bm.UnlockBits(bd);
+      }
+      public static void ToBitmap(bmap map,Bitmap bm,int x0,int y0,int x1,int y1) {
+        int e;
+        if(x1<x0) {e=x0;x0=x1;x1=e;}
+        if(y1<y0) {e=y0;y0=y1;y1=e;}
+        if(x1<0||y1<0||x0>bm.Width-1||y0>bm.Height-1) return;
+        if(y0<0) y0=0;if(y1>bm.Height-1) y1=bm.Height-1;
+        if(x0<0) x0=0;if(x1>bm.Width-1) x1=bm.Width-1;
+        Rectangle r=new Rectangle(x0,y0,x1-x0+1,y1-y0+1);
+        BitmapData bd=bm.LockBits(r,ImageLockMode.WriteOnly,PixelFormat.Format32bppRgb);        
+        for(int y=y0;y<=y1;y++)
+          Marshal.Copy(map.Data,(1+y)*map.Width+1+x0,new IntPtr(bd.Scan0.ToInt64()+bd.Stride*(y-y0)+0*x0),x1-x0+1);
+        bm.UnlockBits(bd);
+      }
+
+      //public static void ToBitmap(bmap map,Bitmap bm,int sx,int sy,int zoom,int border) {} 
+      public static void Color(int c,out byte r,out byte g,out byte b) {
+        r=(byte)(c&255);
+        g=(byte)((c>>8)&255);
+        b=(byte)((c>>16)&255);
+      }
+      public void Clear() { Clear(0xffffff);}
+      public void Clear(int color) {
+        for(int i=0;i<Data.Length;i++) Data[i]=color;
+      }
+      public void ClearByte() {
+        for(int i=0;i<Data.Length;i++)
+          Data[i]&=0xffffff;
+      }
+      public void Border(int color) {
+        for(int x=0;x<Width;x++)
+          Data[x]=Data[Data.Length-1-x]=color;
+        int h=0,g=Width-1;
+        for(int y=0;y<Height;y++) {
+          Data[h]=Data[g]=color;
+          h+=Width;g+=Width;
+        }
+      }
+      int bitscan(int x) {
+       unchecked {
+        int r=0;
+        ushort u;
+        if(x==0) return -1;
+        if(0!=(x&0xffff0000)) {r=16;u=(ushort)(x>>16);} else u=(ushort)x;
+        if(0!=(u&0xff00)) {r+=8;u>>=8;}
+        if(0!=(u&0xf0)) {r+=4;u>>=4;}
+        if(0!=(u&0xc)) {r+=2;u>>=2;}
+        return r+(u==3?1:u-1);
+       }
+      }
+      
+      public static int distance(int mode,int dx,int dy) {
+        int d;      
+        switch(mode) {
+         case 6:d=Math.Abs(dx-dy);break; // \\
+         case 5:d=Math.Abs(dx+dy);break; // //
+         case 4:d=Math.Abs(dx);break;    // |
+         case 3:d=Math.Abs(dy);break;    // -
+         case 2:d=Math.Max(Math.Abs(dx),Math.Abs(dy));break; // []
+         case 1:d=Math.Abs(dx)+Math.Abs(dy);break; // <>
+         default:d=dx*dx+dy*dy;break; // O
+        }
+        return d;
+      }      
+
+      public fillres FloodFill(int x,int y,int color1,int color2,bool x8,bool noblack,int mode,bool fill2black,int gx,int gy,bool zero) {
+        fillres res=new fillres() {x0=x,y0=y,x1=x,y1=y,m=0};
+        if(x<1||x>=Width-1||y<1||y>=Height-1) return res;
+        int xy=(y<<16)+x;
+        int px=y*Width+x,px2;
+        int clr=Data[px];
+        if(noblack&&(clr&0xffffff)==0) return res;
+        Border(fill2black?0:0x7fffffff);
+        int[] fifo=new int[Width*Height];        
+        int n=0,m=0,max=distance(mode,x-gx,y-gy),min=zero?0:max,d;
+        fifo[m++]=xy;
+        Data[px]=-1;
+        bool sqr=mode<1||mode>6;
+        while(n<m) {
+          xy=fifo[n++];
+          int x2=xy&65535,y2=(xy>>16),dx=x2-gx,dy=y2-gy,rd;
+          d=distance(mode,dx,dy);
+          if(d>max) max=d;else if(d<min) min=d;
+          px=y2*Width+x2;
+          rd=Data[(px2=px-Width)];if(fill2black?rd>0:rd==clr) {fifo[m++]=xy-65536;Data[px2]=-1;}
+          rd=Data[(px2=px+Width)];if(fill2black?rd>0:rd==clr) {fifo[m++]=xy+65536;Data[px2]=-1;}
+          rd=Data[(px2=px-1)];if(fill2black?rd>0:rd==clr) {fifo[m++]=xy-1;Data[px2]=-1;}
+          rd=Data[(px2=px+1)];if(fill2black?rd>0:rd==clr) {fifo[m++]=xy+1;Data[px2]=-1;}
+          if(x8) {
+            if(Data[(px2=px-Width-1)]==clr) {fifo[m++]=xy-65537;Data[px2]=-1;}
+            if(Data[(px2=px-Width+1)]==clr) {fifo[m++]=xy-65535;Data[px2]=-1;}
+            if(Data[(px2=px+Width-1)]==clr) {fifo[m++]=xy+65535;Data[px2]=-1;}
+            if(Data[(px2=px+Width+1)]==clr) {fifo[m++]=xy+65537;Data[px2]=-1;}
+          }
+        }
+        n=0;
+        if(sqr) {min=isqrt(min);max=isqrt(max);}
+        int[] cm=new int[max-min+1];
+        for(int i=0;i<cm.Length;i++) cm[i]=Palette.ColorMix(color1,color2,i,max-min);        
+        while(n<m) {
+          xy=fifo[n++];
+          int x2=xy&65535,y2=(xy>>16),dx=x2-gx,dy=y2-gy;
+          if(x2<res.x0) res.x0=x2;else if(x2>res.x1) res.x1=x2;
+          if(y2<res.y0) res.y0=y2;else if(y2>res.y1) res.y1=y2;
+          d=distance(mode,dx,dy);
+          if(sqr) d=isqrt(d);
+          px=y2*Width+x2;
+          //Data[px]=Palette.ColorMix(color1,color2,d-min,max-min);
+          Data[px]=cm[d-min];
+        }
+        res.m=m;
+        return res;
+      }
+      // path gradient
+      public int FloodFillGrad(int[] xy,int color1,int color2,bool border,bool d8,bool x8,bool noblack,bool fill2black) {
+        int x=xy[0],y=xy[1];
+        if(x<1||x>=Width-1||y<1||y>=Height-1) return 0;
+        int px=y*Width+x,px2;
+        int clr=Data[px];
+        if(noblack&&(clr&0xffffff)==0) return 0;
+        Border(fill2black?0:0x7fffffff);
+        int[] fifo=new int[Width*Height];        
+        int n=0,m=0,k=0,xyi=2;
+        int d=-1,md=d;
+        bool dual=d8!=x8&&!border;
+       np:
+        fifo[m++]=px;
+        Data[px]=d;                
+        if(xyi<xy.Length-1) {
+         sp: 
+          x=xy[xyi++];y=xy[xyi++];
+          if(x<1||x>=Width-1||y<1||y>=Height-1) goto sp;
+          px=y*Width+x;
+          goto np;
+        }
+        k=m;
+        d--;
+        while(n<m) {
+          px=fifo[n++];
+          int d2=Data[px]-1;
+          if(dual&&d2!=d) k=m;
+          d=d2;
+          bool fl=false,fr=false,ft=false,fb=false;
+          int rd;
+          rd=Data[(px2=px-Width)];if(fill2black?rd>0:rd==clr) {fifo[m++]=px2;Data[px2]=d;ft=true;}
+          rd=Data[(px2=px+Width)];if(fill2black?rd>0:rd==clr) {fifo[m++]=px2;Data[px2]=d;fb=true;}
+          rd=Data[(px2=px-1)];if(fill2black?rd>0:rd==clr) {fifo[m++]=px2;Data[px2]=d;fl=true;}
+          rd=Data[(px2=px+1)];if(fill2black?rd>0:rd==clr) {fifo[m++]=px2;Data[px2]=d;fr=true;}
+          if(x8||d8) {
+            if(!d8) d--;
+            if(x8&&!d8) {
+              if(!fl&&Data[px-1]<0) fl=true;
+              if(!fr&&Data[px+1]<0) fr=true;
+              if(!ft&&Data[px-Width]<0) ft=true;
+              if(!fb&&Data[px+Width]<0) fb=true;
+            }            
+            rd=Data[(px2=px-Width-1)];if((fill2black?rd>0:rd==clr)&&(x8?d8||!ft&&!fl:ft||fl)) {fifo[m++]=px2;Data[px2]=d;}
+            rd=Data[(px2=px-Width+1)];if((fill2black?rd>0:rd==clr)&&(x8?d8||!ft&&!fr:ft||fr)) {fifo[m++]=px2;Data[px2]=d;}
+            rd=Data[(px2=px+Width-1)];if((fill2black?rd>0:rd==clr)&&(x8?d8||!fb&&!fl:fb||fl)) {fifo[m++]=px2;Data[px2]=d;}
+            rd=Data[(px2=px+Width+1)];if((fill2black?rd>0:rd==clr)&&(x8?d8||!fb&&!fr:fb||fr)) {fifo[m++]=px2;Data[px2]=d;}
+            if(!d8) d++;
+          }
+        }
+        if(border) {
+          n=0;
+          d=-1;          
+          unchecked { clr=(int)0x80000001;}         
+          for(int i=0;i<m;i++) {
+            px=fifo[i];
+            bool go=Data[px-1]>=0||Data[px+1]>=0||Data[px+Width]>=0||Data[px-Width]>=0;
+            if(!go&&x8&&(Data[px-Width-1]>=0||Data[px-Width+1]>=0||Data[px+Width-1]>=0||Data[px+Width+1]>=0)) go=true;
+            if(go) {
+              fifo[n++]=px;
+              Data[px]=d;
+            } else
+              Data[px]=clr;
+          }
+          k=m=n;
+          n=0;
+          dual=d8!=x8;
+          d--;
+          while(n<m) {
+            px=fifo[n++];
+            int d2=Data[px]-1;
+            if(dual&&d2!=d) k=m;
+            d=d2;
+            bool fl=false,fr=false,ft=false,fb=false;
+            if(Data[(px2=px-Width)]==clr) {fifo[m++]=px2;Data[px2]=d;ft=true;};
+            if(Data[(px2=px+Width)]==clr) {fifo[m++]=px2;Data[px2]=d;fb=true;};
+            if(Data[(px2=px-1)]==clr) {fifo[m++]=px2;Data[px2]=d;fl=true;};
+            if(Data[(px2=px+1)]==clr) {fifo[m++]=px2;Data[px2]=d;fr=true;};
+            if(x8||d8) {
+              if(!d8) d--;
+              if(x8&&!d8) {
+                if(!fl&&Data[px-1]<0) fl=true;
+                if(!fr&&Data[px+1]<0) fr=true;
+                if(!ft&&Data[px-Width]<0) ft=true;
+                if(!fb&&Data[px+Width]<0) fb=true;
+              }
+              if(Data[(px2=px-Width-1)]==clr&&(x8?d8||!ft&&!fl:ft||fl)) {if(d8&&!x8) { if(k==m) m++;else fifo[m++]=fifo[k];fifo[k++]=px2;} else fifo[m++]=px2;Data[px2]=d;};
+              if(Data[(px2=px-Width+1)]==clr&&(x8?d8||!ft&&!fr:ft||fr)) {if(d8&&!x8) { if(k==m) m++;else fifo[m++]=fifo[k];fifo[k++]=px2;} else fifo[m++]=px2;Data[px2]=d;};
+              if(Data[(px2=px+Width-1)]==clr&&(x8?d8||!fb&&!fl:fb||fl)) {if(d8&&!x8) { if(k==m) m++;else fifo[m++]=fifo[k];fifo[k++]=px2;} else fifo[m++]=px2;Data[px2]=d;};
+              if(Data[(px2=px+Width+1)]==clr&&(x8?d8||!fb&&!fr:fb||fr)) {if(d8&&!x8) { if(k==m) m++;else fifo[m++]=fifo[k];fifo[k++]=px2;} else fifo[m++]=px2;Data[px2]=d;};              
+              if(!d8) d++;
+            }            
+          }
+        }
+        d=-d;
+        for(n=0;n<m;n++) {
+          px=fifo[n];
+          int d2=-Data[px];
+          Data[px]=Palette.ColorMix(color1,color2,d2-1,d-1);
+        }
+        return m;      
+      }
+      internal void Expand(bool x8,bool diff,bmap src) {
+        if(src==null) src=Clone();
+        src.Border(White);
+        src.ClearByte();
+        int e=Width*(Height-1)-1;
+        for(int i=Width+1;i<e;i++) if(src.Data[i]==0) {
+          if(diff) {
+            bool inner=src.Data[i-1]==0&&src.Data[i+1]==0&&src.Data[i-Width]==0&&src.Data[i+Width]==0;
+            if(inner&&x8&&(src.Data[i-Width-1]!=0||src.Data[i-Width+1]!=0||src.Data[i+Width-1]!=0||src.Data[i+Width+1]!=0)) inner=false;
+            if(inner) Data[i]=White;
+          } else {
+            Data[i-1]=Data[i+1]=Data[i-Width]=Data[i+Width]=0;
+            if(x8) Data[i-Width-1]=Data[i-Width+1]=Data[i+Width-1]=Data[i+Width+1]=0;
+          }
+        }
+      }
+      public void Mirror(bool vertical,bool horizontal) {
+        int x,y;
+        if(vertical) {
+          for(y=0;y<Height-y-1;y++) {
+            int h=y*Width,g=(Height-y-1)*Width;
+            for(x=0;x<Width;x++) {
+              int b;
+              b=Data[g];Data[g]=Data[h];Data[h]=b;
+              g++;h++;
+            }
+          }
+        } 
+        if(horizontal) {
+          for(x=0;x<Width-x-1;x++) {
+            int h=x,g=(Width-x-1);
+            for(y=0;y<Height;y++) {
+              int b;
+              b=Data[g];Data[g]=Data[h];Data[h]=b;
+              g+=Width;h+=Width;
+            }
+          }
+        }
+      }
+      public bmap Rotate90(bool right) {
+        bmap map2=new bmap(Height,Width);
+        int d=Height;
+        d=right?-d:d;
+       unsafe {
+        fixed(int* pd2=map2.Data,pd=Data) {        
+        for(int y=0;y<Height;y++) {
+          int* g2=pd2+(right?(Width-1)*Height+y:(Height-y-1)),h2=pd+y*Width;
+          for(int x=0;x<Width;x++) {
+            *g2=*h2++;
+            g2+=d;
+          }
+        }
+       }}
+        return map2;
+      }      
+      public void Invert(bool intensity,bool bw) {
+        for(int i=0;i<Data.Length;i++) {
+          int c=Data[i]&White;
+          if(c==0||c==White) {
+            if(bw) Data[i]=c==0?White:0; 
+          } else if(intensity) {
+            Data[i]=Palette.InvertIntensity(c);
+          } else Data[i]^=White;
+        }
+      }
+      public void RemoveDots(bool black,bool white) {
+        Border(-1);
+        ClearByte();
+        int h=Height-2,w=Width-2,i=Width+1;
+        for(int y=0;y<h;y++,i+=2) 
+          for(int x=0;x<w;x++,i++) {            
+            if(black&&Data[i]==0) {
+              if(Data[i-1]!=0&&Data[i+1]!=0&&Data[i+Width]!=0&&Data[i-Width]!=0) {
+                Data[i]=White;//Palette.ColorAvg(Data[i],Data[i+1],Data[i+Width],Data[i-Width]);
+              }
+            } else if(white&&Data[i]==White) {
+              if(Data[i-1]!=White&&Data[i+1]!=White&&Data[i+Width]!=White&&Data[i-Width]!=White) {
+                Data[i]=0;//Palette.ColorAvg(Data[i],Data[i+1],Data[i+Width],Data[i-Width]);
+              }            
+            }
+          }
+      }
+      public void Bright(bool dark,int level) {
+        if(level<1||level>255) return;
+        for(int i=0;i<Data.Length;i++) {
+          int x=Data[i];
+          int b0=x&255,b1=(x>>8)&255,b2=(x>>16)&255;
+          if(dark) {b0=b0*level/255;b1=b1*level/255;b2=b2*level/255;}
+          else {b0=255-((255-b0)*level/255);b1=255-((255-b1)*level/255);b2=255-((255-b2)*level/255);}
+          x=b0|(b1<<8)|(b2<<16);
+          Data[i]=x;
+        }
+      }
+      public void Levels(int levels) {
+        if(levels<1||levels>255) return;
+        for(int i=0;i<Data.Length;i++) {
+          int x=Data[i];
+          int s=RGBSum(x);
+          s=s*levels/(765+levels-1);
+          x=Palette.ColorIntensity765(x,s*765/levels);
+          /*
+          int b0=x&255,b1=(x>>8)&255,b2=(x>>16)&255;
+          int s=b0+b1+b2;
+          s=s*levels/(765+levels-1);
+          b0=(byte)(s*255/levels);
+          x=b0|(b0<<8)|(b0<<16);*/
+          Data[i]=x;
+        }
+      }
+      public static int RGBSum(int color) {
+        return (color&255)+((color>>8)&255)+((color>>16)&255);
+      }
+      public void Contour(bool white) {
+        bool[] ba=new bool[Data.Length];
+        int n=Data.Length-Width-1;
+        Border(Black);
+        for(int i=Width+1;i<n;i++) {
+          int ci=RGBSum(Data[i]);
+          ba[i]=ci<RGBSum(Data[i-1])||ci<RGBSum(Data[i+1])||ci<RGBSum(Data[i-Width])||ci<RGBSum(Data[i+Width]);          
+        }
+        for(int i=Width+1;i<n;i++) {
+          if(ba[i]) Data[i]=Black;else if(white) Data[i]=White;
+        }
+      }
+      public void RGB2CMY() {
+        if(Data!=null) for(int i=0;i<Data.Length;i++) Data[i]=Palette.RGB2CMY(Data[i]);
+      }
+      public void RGBShift(int mode) {
+        if(Data!=null) for(int i=0;i<Data.Length;i++) Data[i]=Palette.RGBShift(mode,Data[i]);
+      }
+      public void Line(int x0,int y0,int x1,int y1,int color,bool whiteonly) {
+        int r;
+        if((x0<x1?x0>=Width||x1<0:x1>=Width||x0<0)||(y0<y1?y0>=Height||y1<0:y1>=Height||y0<0)) return;
+        int dx=x1-x0,dy=y1-y0;
+        if(dx<0) dx=-dx;if(dy<0) dy=-dy;
+        int d=dx>dy?dx:dy;
+        if(d==0) {XY(x0,y0,color,whiteonly);return;}
+        dx=x1-x0;dy=y1-y0;
+        for(int i=0;i<=d;i++) {
+          int x=(d+2*(d*x0+i*dx))/d/2,y=(d+2*(d*y0+i*dy))/d/2;
+          if(x>=0&&y>=0&&x<Width&&y<Height) {
+            if(!whiteonly||(Data[y*Width+x]&0xffffff)==White)
+              Data[y*Width+x]=color;
+          }
+        }
+           
+      }
+      public void BrushLine(int x0,int y0,int x1,int y1,int color,bmap brush,bool whiteonly) {
+        if(brush==null) { Line(x0,y0,x1,y1,color,whiteonly);return;}
+        int r;
+        int bx=brush.Width/2,by=brush.Height/2;
+        if((x0<x1?x0>=Width+brush.Width||x1<-brush.Width:x1>=Width+brush.Width||x0<-brush.Width)||(y0<y1?y0>=Height+brush.Height||y1<-brush.Height:y1>=Height+brush.Height||y0<-brush.Height)) return;
+        int dx=x1-x0,dy=y1-y0;
+        if(dx<0) dx=-dx;if(dy<0) dy=-dy;
+        int d=dx>dy?dx:dy;
+        if(d==0) {Brush(x0,y0,color,brush,whiteonly);return;}
+        dx=x1-x0;dy=y1-y0;
+        for(int i=0;i<=d;i++) {
+          //int x=x0+i*dx/d,y=y0+i*dy/d;
+          int x=(d+2*(d*x0+i*dx))/d/2,y=(d+2*(d*y0+i*dy))/d/2;          
+          Brush(x,y,color,brush,whiteonly);
+        }
+           
+      }
+    }
+    public class Palette {
+        public static double max(double a,double b,double c) {
+          return a>b?a>c?a:c:b>c?b:c;  
+        }
+        public static double size(double a,double b,double c) {
+          return Math.Sqrt(a*a+b*b+c*c);
+        }
+        public static int ColorMix(int color1,int color2,int i,int max) {
+          if(i<=0) return color1;
+          if(i>=max) return color2;
+          int result=0;
+          result=((color2&255)*i+(color1&255)*(max-i))/max
+            |(((((color2>>8)&255)*i+((color1>>8)&255)*(max-i))/max)<<8)
+            |(((((color2>>16)&255)*i+((color1>>16)&255)*(max-i))/max)<<16);
+          return result;
+        }
+        public static int ColorAvg(int c1,int c2,int c3,int c4) {
+          int r=(c1&0xff)+(c2&0xff)+(c3&0xff)+(c4&0xff);
+          int g=(c1&0xff00)+(c1&0xff00)+(c3&0xff00)+(c4&0xff00);
+          int b=(c1&0xff0000)+(c1&0xff0000)+(c3&0xff0000)+(c4&0xff0000);
+          return ((r>>2)&0xff)|((g>>2)&0xff00)|((b>>2)&0xff0000);
+        }
+        public static void Color(byte[] data,int offset,double value,double[] palette,bool hsv) {         
+          int p;
+          if(value<=palette[0]) {
+            data[offset+2]=(byte)(palette[1]*255.5);
+            data[offset+1]=(byte)(palette[2]*255.5);
+            data[offset]=(byte)(palette[3]*255.5);
+          } else if(value>=palette[palette.Length-4]) {
+            p=palette.Length-3;
+            data[offset+2]=(byte)(palette[p++]*255.5);
+            data[offset+1]=(byte)(palette[p++]*255.5);
+            data[offset]=(byte)(palette[p++]*255.5);
+          } else {
+            for(p=0;p<palette.Length&&value>palette[p+4];p+=4);
+            double r1=(value-palette[p])/(palette[p+4]-palette[p]),r0=1-r1;
+            if(hsv) {
+              double r=palette[p+1]*r0+palette[p+5]*r1;
+              double g=palette[p+2]*r0+palette[p+6]*r1;
+              double b=palette[p+3]*r0+palette[p+7]*r1;
+              double s=size(palette[p+1],palette[p+2],palette[p+3])*r0+size(palette[p+5],palette[p+6],palette[p+7])*r1;
+              double s2=size(r,g,b);
+              if(s2>0) {
+                double m=max(r,g,b);
+                s/=s2;
+                if(m*s>1) s=1/m;
+                r*=s;g*=s;b*=s;
+              }
+              data[offset+2]=(byte)(255.5*r);
+              data[offset+1]=(byte)(255.5*g);
+              data[offset]=(byte)(255.5*b);
+            } else {
+              data[offset+2]=(byte)(255.5*(palette[p+1]*r0+palette[p+5]*r1));
+              data[offset+1]=(byte)(255.5*(palette[p+2]*r0+palette[p+6]*r1));
+              data[offset]=(byte)(255.5*(palette[p+3]*r0+palette[p+7]*r1));
+            }
+          }
+        }
+        public static void RGB2HSV(double r,double g,double b,out double h,out double s,out double v) {
+           double min=r<g?r<b?r:b:g<b?g:b;
+           double max=r>g?r>b?r:b:g>b?g:b;
+           v=max;
+           if(max==min) {
+             s=0;
+             h=-1;
+             return;
+           }
+           double delta=max-min;
+           s=delta/max;
+           if(r==max) h=(g-b)/delta;
+           else if(g==max) h=2+(b-r)/delta;
+           else h=4+(r-g)/delta;
+           if(h<0) h+=6;
+           //h*=60;
+        }
+        public static void HSV2RGB(double h,double s,double v,out double r,out double g,out double b) {
+          if(s==0) {
+            r=g=b=v;
+            return;
+          }
+          //h/=60;
+          int i=(int)Math.Floor(h);
+          double f=h-i;
+          double p=v*(1-s),q=v*(1-s*f),t=v*(1-s*(1-f));
+          switch(i) {
+           case 0:r=v;g=t;b=p;break;
+           case 1:r=q;g=v;b=p;break;
+           case 2:r=p;g=v;b=t;break;
+           case 3:r=p;g=q;b=v;break;
+           case 4:r=t;g=p;b=v;break;
+           default:r=v;g=p;b=q;break;               
+          }          
+        }
+        public static int ColorIntensity(int color,int i) {
+          if(i==100) return color;
+          if(i<=0) return 0;
+          int r=color&255,g=(color>>8)&255,b=(color>>16)&255;
+          r=r*i/256;if(r>255) r=255;
+          g=g*i/256;if(g>255) g=255;
+          b=b*i/256;if(b>255) b=255;
+          return r|(g<<8)|(b<<16);
+        }
+        public static int ColorIntensity765(int color,int i) { return ColorIntensity765(color,i,false);}
+        public static int ColorIntensity765(int color,int i,bool satur) {
+          if(i<=0) return bmap.Black;else if(i>=765) return bmap.White;          
+          int r=color&255,g=(color>>8)&255,b=(color>>16)&255;
+          int s=r+g+b;
+          if(s==i) goto end;
+          if(r==b&&b==g) { r=g=i/3;b=i-r-g;goto end2;}          
+          if(satur) {
+            if(i<s) {
+              int mi=r<g?r:g;
+              if(b<mi) mi=b;
+              if(mi>0) {
+                r=255-(255-r)*255/(255-mi);g=255-(255-g)*255/(255-mi);b=255-(255-b)*255/(255-mi);
+              }
+            } else {
+              int ma=r>g?r:g;
+              if(b>ma) ma=b;
+              if(ma<255) {
+                r=r*255/ma;g=g*255/ma;b=b*255/ma;
+              }            
+            }
+            s=r+g+b;
+          }
+          if(i<s) {
+            r=r*i/s;g=g*i/s;b=i-r-g;
+          } else {
+            i=765-i;s=765-s;
+            r=255-((255-r)*i/s);g=255-((255-g)*i/s);b=(765-i)-r-g;
+          }
+         end2:
+          if(b<0) {
+            b++;if(r>0) r--;else if(g>0) g--;
+            if(b<0) {b++;if(g>0) g--;else if(r>0) r--;}
+          } else if(b>255) {
+            b--;if(r<255) r++;else if(g<255) g++;
+            if(b>255) {b--;if(g<255) g++;else if(r<255) r++;}
+          }         
+         end: 
+          return r|(g<<8)|(b<<16);
+        }
+        public static int RGB2CMY(int rgb) {
+          int p0=rgb&255,p1=(rgb>>8)&255,p2=(rgb>>16)&255,r,g,b;
+          if(p0>p1&&p0>p2) {
+            if(p1>p2) {r=p2;g=p0-p1+p2;b=p0;}
+            else {r=p1;g=p0;b=p0-p2+p1;}
+          } else if(p1>p0&&p1>p2) {
+            if(p0>p2) {r=p1-p0+p2;g=p2;b=p1;}
+            else {r=p1;g=p0;b=p1-p2+p0;}
+          } else {
+            if(p0>p1) {r=p2-p0+p1;g=p2;b=p1;}
+            else {r=p2;g=p2-p1+p0;b=p0;}
+          }
+          return r|(g<<8)|(b<<16);
+        }
+        public static int RGBShift(int mode,int rgb) {        
+          int r=rgb&255,g=(rgb>>8)&255,b=(rgb>>16)&255,x;
+          switch(mode) {
+           case 3:x=g;g=b;b=x;break;
+           case 2:x=r;r=b;b=x;break;
+           case 1:x=r;r=g;g=x;break;
+           default:x=r;r=g;g=b;b=x;break;
+          }
+          
+          return r|(g<<8)|(b<<16);
+        }
+        public static int InvertIntensity(int rgb) {
+          int r=rgb&255,g=(rgb>>8)&255,b=(rgb>>16)&255;
+          int min=r<g?r<b?r:b:g<b?g:b;
+          int max=r>g?r>b?r:b:g>b?g:b;
+          int del=max-min,sum=r+g+b,sum2=765-sum;
+          if(del==0) r=g=b=255-r;
+          else {
+            r=(r-min)*255/del;
+            g=(g-min)*255/del;
+            b=(b-min)*255/del;
+            sum=r+g+b;
+            if(r+g+b>sum2) {
+              r=r*sum2/sum;
+              g=g*sum2/sum;
+              b=b*sum2/sum;              
+            } else {
+              r=(255-(255-r)*(765-sum2)/(765-sum));
+              g=(255-(255-g)*(765-sum2)/(765-sum));
+              b=(255-(255-b)*(765-sum2)/(765-sum));
+            }
+          }          
+          return r|(g<<8)|(b<<16);
+        }
+        public static Color IntColor(int rgb) {
+          return System.Drawing.Color.FromArgb((255<<24)|rgb);
+        }
+    }
+    
+    public static class GDI {
+      public static bool CtrlRKey {get{ return 0!=(0x8000&GDI.GetKeyState(Keys.RControlKey));}}
+      public static bool CtrlKey {get{ return 0!=(0x8000&GDI.GetKeyState(Keys.ControlKey));}}
+      public static bool ShiftKey {get{ return 0!=(0x8000&GDI.GetKeyState(Keys.ShiftKey));}}
+      public static bool ShiftRKey {get{ return 0!=(0x8000&GDI.GetKeyState(Keys.RShiftKey));}}
+      public static bool AltKey {get{ return 0!=(0x8000&GDI.GetKeyState(Keys.Menu));}}
+      public static bool AltRKey {get{ return 0!=(0x8000&GDI.GetKeyState(Keys.RMenu));}}
+      public static bool CapsLock {get{ return 0!=(0x0001&GDI.GetKeyState(Keys.CapsLock));}}
+      public static bool LButton {get{ return 0!=(0x8000&GDI.GetKeyState(Keys.LButton));}}
+      public static bool RButton {get{ return 0!=(0x8000&GDI.GetKeyState(Keys.RButton));}}
+    
+     [DllImport("user32"), SuppressUnmanagedCodeSecurity, PreserveSig]
+     public static extern short GetKeyState(Keys key);
+
+     [DllImport("gdi32.dll"),SuppressUnmanagedCodeSecurity,PreserveSig]
+     public extern static int SetROP2(IntPtr hdc,int fnDrawMode);
+     
+     [DllImport("gdi32.dll"),SuppressUnmanagedCodeSecurity,PreserveSig]
+     public extern static bool MoveToEx(IntPtr hdc, int x, int y, IntPtr lpPoint);
+
+     [DllImport("gdi32.dll"),SuppressUnmanagedCodeSecurity,PreserveSig]
+     public extern static bool LineTo(IntPtr hdc, int x, int y);     
+
+     [DllImport("gdi32.dll"),SuppressUnmanagedCodeSecurity,PreserveSig]
+     public static extern IntPtr SelectObject([In] IntPtr hdc,[In] IntPtr hgdiobj);
+
+     [DllImport("gdi32.dll"),SuppressUnmanagedCodeSecurity,PreserveSig]
+     public static extern IntPtr GetStockObject(int fnObject);
+    
+     public const int WHITE_PEN=7;
+     public const int BLACK_PEN=7;
+     public const int R2_XORPEN=7;
+     public const int R2_NOTXORPEN=10;
+     public const int R2_COPYPEN=13;
+    }
+
+
+}
